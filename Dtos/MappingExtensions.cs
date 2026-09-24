@@ -14,5 +14,8 @@ public static class MappingExtensions
 
     public static ContributionResponse ToResponse(this Contribution contribution) =>
         new(contribution.Id, contribution.StokvelId, contribution.UserId,
-            contribution.Cycle, contribution.Amount, contribution.RecordedAtUtc);
+            contribution.CycleId, contribution.Amount, contribution.RecordedAtUtc);
+
+    public static ContributionCycleResponse ToResponse(this ContributionCycle cycle) =>
+        new(cycle.Id, cycle.StokvelId, cycle.CycleNumber, cycle.TargetAmount, cycle.CreatedAtUtc);
 }

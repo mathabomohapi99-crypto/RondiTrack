@@ -93,3 +93,43 @@ All 4.1 endpoints now return RFC 9457 `application/problem+json` on every error 
 `Problem(...)` / the `DomainProblem`/`NotFoundProblem` helpers), not bare strings. `NotFound()`
 calls were replaced with `NotFoundProblem(...)` so a 404 body has the same shape as every other
 error.
+
+
+
+## Assignment 4.3: Validation & Centralized Error Handling
+
+### Exception hierarchy
+`DomainValidationException` (400), `DomainNotFoundException` (404), `DomainConflictException` (409),
+`DomainReferenceException` (422), plus FluentValidation's `ValidationException` (400) for malformed
+requests caught before the service layer runs.
+
+The idempotency-key conflict and a duplicate contribution both use `DomainConflictException` — I
+classified them as the same kind of failure, because both describe a request that is well-formed
+and valid on its own but clashes with something that already happened (a prior contribution, a
+prior use of the same key with different data).
+
+### Validation vs exceptions
+FluentValidation validators (in `Validators/`) only check shape: required fields, ranges, enum
+membership. They never touch a repository. Anything needing to check whether something else exists
+or already happened (duplicate email, missing stokvel, already-paid cycle, idempotency-key reuse)
+is a thrown domain exception, caught by the single `RondiExceptionHandler`.
+
+### Centralized handling
+Every controller action now throws instead of building its own response. `RondiExceptionHandler`
+(registered via `AddExceptionHandler`) maps every exception type to a status code, logs it with a
+correlation ID, and writes a single `application/problem+json` shape. No controller constructs a
+`ProblemDetails` by hand anymore.
+
+### ContributionCycle
+Plain CRUD from the controller, no service method — there's no cross-entity decision involved,
+just checking the parent stokvel exists before creating a cycle. `Contribution` now references a
+real `ContributionCycle.Id` instead of a placeholder cycle number.
+
+### Correlation ID
+Every error response includes a `correlationId` in its body that matches the structured log entry
+for that request, e.g.:
+
+### Negative-path tests
+`RondiTrack.Tests/ErrorHandlingTests.cs` covers a malformed request (400), a not-found resource
+(404), and a business-rule conflict (409) — all asserting both the status code and that the
+response content type is `application/problem+json`. All 3 pass.

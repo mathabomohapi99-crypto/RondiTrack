@@ -18,60 +18,43 @@ public class UsersController(IUserRepository users, IStokvelRepository stokvels)
     [HttpGet("{id:guid}")]
     public async Task<ActionResult<UserResponse>> GetById(Guid id)
     {
-        var user = await users.GetByIdAsync(id);
-        return user is null ? NotFoundProblem($"User {id} was not found.") : Ok(user.ToResponse());
+        var user = await users.GetByIdAsync(id) ?? throw new DomainNotFoundException($"User {id} was not found.");
+        return Ok(user.ToResponse());
     }
 
     [HttpPost]
     public async Task<ActionResult<UserResponse>> Create(UserRequest request)
     {
-        try
-        {
-            var user = new User(request.FullName, request.Email);
+        var user = new User(request.FullName, request.Email);
 
-            if (await users.EmailExistsAsync(user.Email))
-                return Problem(detail: $"A user with email '{user.Email}' already exists.",
-                    statusCode: StatusCodes.Status409Conflict);
+        if (await users.EmailExistsAsync(user.Email))
+            throw new DomainConflictException($"A user with email '{user.Email}' already exists.");
 
-            await users.AddAsync(user);
-            return CreatedAtAction(nameof(GetById), new { id = user.Id }, user.ToResponse());
-        }
-        catch (DomainException ex)
-        {
-            return DomainProblem(ex);
-        }
+        await users.AddAsync(user);
+        return CreatedAtAction(nameof(GetById), new { id = user.Id }, user.ToResponse());
     }
 
     [HttpPut("{id:guid}")]
     public async Task<ActionResult<UserResponse>> Update(Guid id, UserRequest request)
     {
-        var user = await users.GetByIdAsync(id);
-        if (user is null) return NotFoundProblem($"User {id} was not found.");
+        var user = await users.GetByIdAsync(id) ?? throw new DomainNotFoundException($"User {id} was not found.");
 
-        try
-        {
-            if (await users.EmailExistsAsync(request.Email, excludingUserId: id))
-                return Problem(detail: $"A user with email '{request.Email.Trim()}' already exists.",
-                    statusCode: StatusCodes.Status409Conflict);
+        if (await users.EmailExistsAsync(request.Email, excludingUserId: id))
+            throw new DomainConflictException($"A user with email '{request.Email.Trim()}' already exists.");
 
-            user.UpdateDetails(request.FullName, request.Email);
-            await users.UpdateAsync(user);
-            return Ok(user.ToResponse());
-        }
-        catch (DomainException ex)
-        {
-            return DomainProblem(ex);
-        }
+        user.UpdateDetails(request.FullName, request.Email);
+        await users.UpdateAsync(user);
+        return Ok(user.ToResponse());
     }
 
     [HttpDelete("{id:guid}")]
     public async Task<IActionResult> Delete(Guid id)
     {
-        if (await users.GetByIdAsync(id) is null) return NotFoundProblem($"User {id} was not found.");
+        if (await users.GetByIdAsync(id) is null)
+            throw new DomainNotFoundException($"User {id} was not found.");
 
         if (await stokvels.AnyWithMemberAsync(id))
-            return Problem(detail: "This user belongs to at least one stokvel. Remove them from all stokvels first.",
-                statusCode: StatusCodes.Status409Conflict);
+            throw new DomainConflictException("This user belongs to at least one stokvel. Remove them from all stokvels first.");
 
         await users.DeleteAsync(id);
         return NoContent();

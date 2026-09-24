@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="RondiTrack.csproj" />
+  <Project Path="RondiTrack.Tests/RondiTrack.Tests.csproj" />
+</Solution>

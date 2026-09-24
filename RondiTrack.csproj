@@ -7,8 +7,17 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="FluentValidation" Version="12.1.1" />
+    <PackageReference Include="FluentValidation.DependencyInjectionExtensions" Version="12.1.1" />
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.3" />
     <PackageReference Include="Scalar.AspNetCore" Version="2.17.7" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="RondiTrack.Tests\**" />
+    <Content Remove="RondiTrack.Tests\**" />
+    <None Remove="RondiTrack.Tests\**" />
+    <EmbeddedResource Remove="RondiTrack.Tests\**" />
   </ItemGroup>
 
 </Project>

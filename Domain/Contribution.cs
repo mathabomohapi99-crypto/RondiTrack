@@ -5,15 +5,12 @@ public sealed class Contribution
     public Guid Id { get; }
     public Guid StokvelId { get; }
     public Guid UserId { get; }
-    public int Cycle { get; }
+    public Guid CycleId { get; }
     public decimal Amount { get; }
     public DateTime RecordedAtUtc { get; }
 
-    public Contribution(Guid stokvelId, Guid userId, int cycle, decimal amount)
+    public Contribution(Guid stokvelId, Guid userId, Guid cycleId, decimal amount)
     {
-        if (cycle < 1)
-            throw new DomainValidationException("Cycle must be 1 or greater.");
-
         if (amount <= 0)
             throw new DomainValidationException("Contribution amount must be greater than zero.");
 
@@ -23,7 +20,7 @@ public sealed class Contribution
         Id = Guid.NewGuid();
         StokvelId = stokvelId;
         UserId = userId;
-        Cycle = cycle;
+        CycleId = cycleId;
         Amount = amount;
         RecordedAtUtc = DateTime.UtcNow;
     }
