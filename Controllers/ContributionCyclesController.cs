@@ -10,7 +10,10 @@ public class ContributionCyclesController(
     IContributionCycleRepository cycles,
     IStokvelRepository stokvels) : RondiControllerBase
 {
+    /// <summary>Lists a stokvel's contribution cycles.</summary>
     [HttpGet]
+    [ProducesResponseType(typeof(IReadOnlyList<ContributionCycleResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
     public async Task<ActionResult<IReadOnlyList<ContributionCycleResponse>>> GetAll(Guid stokvelId)
     {
         if (await stokvels.GetByIdAsync(stokvelId) is null)
@@ -20,7 +23,10 @@ public class ContributionCyclesController(
         return Ok(all.Select(c => c.ToResponse()));
     }
 
+    /// <summary>Gets a single contribution cycle.</summary>
     [HttpGet("{id:guid}")]
+    [ProducesResponseType(typeof(ContributionCycleResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
     public async Task<ActionResult<ContributionCycleResponse>> GetById(Guid stokvelId, Guid id)
     {
         var cycle = await cycles.GetByIdAsync(id);
@@ -29,7 +35,11 @@ public class ContributionCyclesController(
         return Ok(cycle.ToResponse());
     }
 
+    /// <summary>Creates a new contribution cycle for a stokvel.</summary>
     [HttpPost]
+    [ProducesResponseType(typeof(ContributionCycleResponse), StatusCodes.Status201Created)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
     public async Task<ActionResult<ContributionCycleResponse>> Create(Guid stokvelId, ContributionCycleRequest request)
     {
         if (await stokvels.GetByIdAsync(stokvelId) is null)
@@ -40,7 +50,11 @@ public class ContributionCyclesController(
         return CreatedAtAction(nameof(GetById), new { stokvelId, id = cycle.Id }, cycle.ToResponse());
     }
 
+    /// <summary>Updates a contribution cycle's number and target amount.</summary>
     [HttpPut("{id:guid}")]
+    [ProducesResponseType(typeof(ContributionCycleResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
     public async Task<ActionResult<ContributionCycleResponse>> Update(Guid stokvelId, Guid id, ContributionCycleRequest request)
     {
         var cycle = await cycles.GetByIdAsync(id);
@@ -52,7 +66,10 @@ public class ContributionCyclesController(
         return Ok(cycle.ToResponse());
     }
 
+    /// <summary>Deletes a contribution cycle.</summary>
     [HttpDelete("{id:guid}")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
     public async Task<IActionResult> Delete(Guid stokvelId, Guid id)
     {
         var cycle = await cycles.GetByIdAsync(id);

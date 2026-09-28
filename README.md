@@ -133,3 +133,80 @@ for that request, e.g.:
 `RondiTrack.Tests/ErrorHandlingTests.cs` covers a malformed request (400), a not-found resource
 (404), and a business-rule conflict (409) — all asserting both the status code and that the
 response content type is `application/problem+json`. All 3 pass.
+
+
+
+## Assignment 4.4: Documentation & Testing
+
+### Documentation
+
+Every endpoint across 4.1–4.3 now has an XML `<summary>` and `[ProducesResponseType]` attributes
+for every realistic response — success and every problem+json failure it can return (400/404/409/422
+as applicable) — so Scalar shows the full contract, not just the inferred happy path.
+
+### Test suite
+
+* `UnitTests.cs` — no HTTP, no DI container. Tests `Stokvel.AddMember` directly (full stokvel,
+  duplicate member, success) and `ContributionService` built by hand from its in-memory repositories
+  (duplicate-cycle rule, idempotent replay, idempotency-key conflict on a different payload).
+* `IntegrationTests.cs` — through `WebApplicationFactory`, exercising the real pipeline (validation →
+  service → exception handler): happy paths for Users and Stokvels, a validation failure, a not-found,
+  the membership business rule (409 full, 422 nonexistent user), and the full idempotency guarantee
+  (same key/same body replay, same key/different body 409, new key/same cycle 409, missing key 400).
+* `ErrorHandlingTests.cs` (from 4.3) — malformed request, not-found, duplicate-email conflict.
+
+### Edge cases
+
+1. **Empty collection** — `GET /members` on a stokvel with no members yet. Found by asking what the
+   very first request against a brand-new stokvel looks like, before anyone has joined.
+2. **Boundary value** — `MaxMembers = 2`, the validator's inclusive minimum. Found by re-reading
+   `InclusiveBetween(2, 50)` and checking the edge itself is accepted, not just values inside it.
+3. **Cross-resource reference** — a contribution request whose `CycleId` is valid but belongs to a
+   *different* stokvel than the one in the URL. Found by noticing the service only checked the cycle
+   existed, not that it belonged to the stokvel being paid into.
+
+### Deliberately broken rule
+
+Commented out the `IsFull` check in `Stokvel.AddMember`, reran `dotnet test`:
+`AddMember_Throws_When_Stokvel_Is_Full` failed as expected, confirming the suite would catch a real
+regression there. Reverted immediately.
+
+### Test run
+
+```text
+Test summary: total: 22, failed: 0, succeeded: 22, skipped: 0, duration: 8.4s
+Build succeeded with 4 warning(s) in 18.0s
+```
+
+### Definition of Done
+
+| Endpoint                    | Documented | Validated | Unit-tested                                 | Integration-tested                 | Status codes reviewed |
+| --------------------------- | ---------- | --------- | ------------------------------------------- | ---------------------------------- | --------------------- |
+| GET /api/users              | Yes        | N/A       | No                                          | No                                 | Yes                   |
+| GET /api/users/{id}         | Yes        | N/A       | No                                          | Yes (404)                          | Yes                   |
+| POST /api/users             | Yes        | Yes       | No                                          | Yes (201, 400, 409)                | Yes                   |
+| PUT /api/users/{id}         | Yes        | Yes       | No                                          | No                                 | Yes                   |
+| DELETE /api/users/{id}      | Yes        | N/A       | No                                          | No                                 | Yes                   |
+| GET /api/stokvels           | Yes        | N/A       | No                                          | No                                 | Yes                   |
+| GET /api/stokvels/{id}      | Yes        | N/A       | No                                          | Yes (404)                          | Yes                   |
+| POST /api/stokvels          | Yes        | Yes       | No                                          | Yes (201, 400, boundary)           | Yes                   |
+| PUT /api/stokvels/{id}      | Yes        | Yes       | No                                          | No                                 | Yes                   |
+| DELETE /api/stokvels/{id}   | Yes        | N/A       | No                                          | No                                 | Yes                   |
+| GET .../members             | Yes        | N/A       | No                                          | Yes (empty-list edge case)         | Yes                   |
+| GET .../members/{userId}    | Yes        | N/A       | No                                          | No                                 | Yes                   |
+| POST .../members            | Yes        | Yes       | Yes (full, duplicate, success)              | Yes (409, 422)                     | Yes                   |
+| DELETE .../members/{userId} | Yes        | N/A       | No                                          | No                                 | Yes                   |
+| POST .../contributions      | Yes        | Yes       | Yes (duplicate cycle, replay, key conflict) | Yes (400, 409×2, 422, idempotency) | Yes                   |
+| GET .../cycles              | Yes        | N/A       | No                                          | No                                 | Yes                   |
+| GET .../cycles/{id}         | Yes        | N/A       | No                                          | No                                 | Yes                   |
+| POST .../cycles             | Yes        | Yes       | No                                          | Used as test seed helper           | Yes                   |
+| PUT .../cycles/{id}         | Yes        | Yes       | No                                          | No                                 | Yes                   |
+| DELETE .../cycles/{id}      | Yes        | N/A       | No                                          | No                                 | Yes                   |
+
+### Known gap
+
+Plain CRUD reads/updates/deletes on Users, Stokvels, and ContributionCycles (the "No" rows above)
+have no dedicated integration test. Deliberate, time-boxed choice: they carry no business logic
+beyond what the entity constructors and FluentValidation already unit-guarantee, so test effort went
+into the endpoints that actually decide something — membership and contributions. Closing this gap
+is the first thing to do before Week 5 persistence work touches these same code paths.
