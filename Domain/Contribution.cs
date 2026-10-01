@@ -2,12 +2,14 @@ namespace RondiTrack.Domain;
 
 public sealed class Contribution
 {
-    public Guid Id { get; }
-    public Guid StokvelId { get; }
-    public Guid UserId { get; }
-    public Guid CycleId { get; }
-    public decimal Amount { get; }
-    public DateTime RecordedAtUtc { get; }
+    public Guid Id { get; private set; }
+    public Guid StokvelId { get; private set; }
+    public Guid UserId { get; private set; }
+    public Guid CycleId { get; private set; }
+    public decimal Amount { get; private set; }
+    public DateTime RecordedAtUtc { get; private set; }
+
+    private Contribution() { } // for EF Core only
 
     public Contribution(Guid stokvelId, Guid userId, Guid cycleId, decimal amount)
     {

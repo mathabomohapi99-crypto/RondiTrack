@@ -1,5 +1,6 @@
 using System.Text.Json.Serialization;
 using FluentValidation;
+using Microsoft.EntityFrameworkCore;
 using RondiTrack.Data;
 using RondiTrack.Errors;
 using RondiTrack.Services;
@@ -17,6 +18,16 @@ builder.Services.AddProblemDetails();
 builder.Services.AddExceptionHandler<RondiExceptionHandler>();
 
 builder.Services.AddValidatorsFromAssemblyContaining<Program>();
+
+var connectionString = builder.Configuration.GetConnectionString("RondiTrack")
+    ?? throw new InvalidOperationException(
+        "Set ConnectionStrings:RondiTrack with dotnet user-secrets.");
+
+builder.Services.AddDbContext<RondiTrackDbContext>(o =>
+    o.UseNpgsql(connectionString, n => n.EnableRetryOnFailure(
+        maxRetryCount: 4,
+        maxRetryDelay: TimeSpan.FromSeconds(10),
+        errorCodesToAdd: null)));
 
 builder.Services.AddSingleton<IUserRepository, InMemoryUserRepository>();
 builder.Services.AddSingleton<IStokvelRepository, InMemoryStokvelRepository>();

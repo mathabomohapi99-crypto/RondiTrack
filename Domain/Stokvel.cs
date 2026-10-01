@@ -9,16 +9,18 @@ public sealed class Stokvel
 
     private readonly List<User> _members = [];
 
-    public Guid Id { get; }
+    public Guid Id { get; private set; }
     public string Name { get; private set; }
     public decimal ContributionAmount { get; private set; }
     public ContributionFrequency Frequency { get; private set; }
     public int MaxMembers { get; private set; }
-    public DateTime CreatedAtUtc { get; }
+    public DateTime CreatedAtUtc { get; private set; }
 
     public IReadOnlyCollection<User> Members => _members.AsReadOnly();
     public decimal PayoutPerCycle => ContributionAmount * _members.Count;
     public bool IsFull => _members.Count >= MaxMembers;
+
+    private Stokvel() { Name = null!; } // for EF Core only
 
     public Stokvel(string name, decimal contributionAmount, ContributionFrequency frequency, int maxMembers)
     {
