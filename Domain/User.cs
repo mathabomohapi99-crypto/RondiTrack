@@ -6,10 +6,12 @@ public sealed class User
 {
     public const int MaxNameLength = 100;
 
-    public Guid Id { get; }
+    public Guid Id { get; private set; }
     public string FullName { get; private set; }
     public string Email { get; private set; }
-    public DateTime CreatedAtUtc { get; }
+    public DateTime CreatedAtUtc { get; private set; }
+
+    private User() { FullName = null!; Email = null!; } // for EF Core only
 
     public User(string fullName, string email)
     {

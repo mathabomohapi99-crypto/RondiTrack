@@ -29,14 +29,20 @@ builder.Services.AddDbContext<RondiTrackDbContext>(o =>
         maxRetryDelay: TimeSpan.FromSeconds(10),
         errorCodesToAdd: null)));
 
+// Still in-memory on purpose (not swapped yet)
 builder.Services.AddSingleton<IUserRepository, InMemoryUserRepository>();
 builder.Services.AddSingleton<IStokvelRepository, InMemoryStokvelRepository>();
-builder.Services.AddSingleton<IContributionRepository, InMemoryContributionRepository>();
 builder.Services.AddSingleton<IContributionCycleRepository, InMemoryContributionCycleRepository>();
 builder.Services.AddSingleton<IIdempotencyStore, InMemoryIdempotencyStore>();
 
+// Swapped to EF Core: Scoped, because a DbContext lives for one request
+builder.Services.AddScoped<IContributionRepository, EfContributionRepository>();
+
 builder.Services.AddScoped<IStokvelMembershipService, StokvelMembershipService>();
 builder.Services.AddScoped<IContributionService, ContributionService>();
+
+builder.Services.AddScoped<IPayoutFaultHook, NoOpPayoutFaultHook>();
+builder.Services.AddScoped<IPayoutService, PayoutService>();
 
 var app = builder.Build();
 

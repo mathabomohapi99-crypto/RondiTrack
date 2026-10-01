@@ -2,11 +2,14 @@ namespace RondiTrack.Domain;
 
 public sealed class ContributionCycle
 {
-    public Guid Id { get; }
-    public Guid StokvelId { get; }
+    public Guid Id { get; private set; }
+    public Guid StokvelId { get; private set; }
     public int CycleNumber { get; private set; }
     public decimal TargetAmount { get; private set; }
-    public DateTime CreatedAtUtc { get; }
+    public CycleStatus Status { get; private set; } = CycleStatus.Open;
+    public DateTime CreatedAtUtc { get; private set; }
+
+    private ContributionCycle() { } // for EF Core only
 
     public ContributionCycle(Guid stokvelId, int cycleNumber, decimal targetAmount)
     {
@@ -31,5 +34,13 @@ public sealed class ContributionCycle
 
         CycleNumber = cycleNumber;
         TargetAmount = targetAmount;
+    }
+
+    public void MarkPaidOut()
+    {
+        if (Status != CycleStatus.Open)
+            throw new DomainConflictException("This cycle has already been paid out.");
+
+        Status = CycleStatus.PaidOut;
     }
 }
