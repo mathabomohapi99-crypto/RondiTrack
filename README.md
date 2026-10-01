@@ -274,14 +274,14 @@ Each `StokvelMember` has a `RotationPosition`. The next recipient is the member 
 `PayoutService.ProcessNextPayoutAsync` wraps two writes (insert the `Payout`, then set the cycle to `PaidOut`) in an explicit `IDbContextTransaction`, inside `CreateExecutionStrategy()` (required when retry-on-failure is enabled). A test-only `IPayoutFaultHook` throws between the two writes. The test `ProcessNextPayout_WhenItFailsAfterThePayoutInsert_LeavesNothingBehind` then re-queries with a **brand new DbContext** and asserts 0 payouts for the cycle and the cycle still `Open`. **Result: passed.** A second test checks the happy path (first member in rotation is paid 200, cycle becomes `PaidOut`): passed.
 
 ### 10. Definition of Done (extended)
-| Entity | [FILL: your 4.4 columns] | Persisted via EF Core | Explicit transaction tested |
+| Entity | Persisted via EF Core | Explicit transaction tested |
 |---|---|---|---|
-| User | ... | no | N/A |
-| Stokvel | ... | no | N/A |
-| StokvelMember | ... | no | N/A |
-| ContributionCycle | ... | no | yes |
-| Contribution | ... | yes | N/A |
-| Payout | ... | yes | yes |
+| User | no | N/A |
+| Stokvel | no | N/A |
+| StokvelMember |no | N/A |
+| ContributionCycle |no | yes |
+| Contribution |yes | N/A |
+| Payout | yes | yes |
 
 ### 11. Gaps I chose not to close yet
 - User, Stokvel, ContributionCycle and idempotency repositories stay in-memory by decision, not oversight.
