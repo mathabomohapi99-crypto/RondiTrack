@@ -275,12 +275,12 @@ Each `StokvelMember` has a `RotationPosition`. The next recipient is the member 
 
 ### 10. Definition of Done (extended)
 | Entity | Persisted via EF Core | Explicit transaction tested |
-|---|---|---|---|
+|---|---|---|
 | User | no | N/A |
 | Stokvel | no | N/A |
-| StokvelMember |no | N/A |
-| ContributionCycle |no | yes |
-| Contribution |yes | N/A |
+| StokvelMember | no | N/A |
+| ContributionCycle | no  | yes |
+| Contribution | yes | N/A |
 | Payout | yes | yes |
 
 ### 11. Gaps I chose not to close yet
