@@ -8,7 +8,9 @@ namespace RondiTrack.Controllers;
 [Route("api/stokvels/{stokvelId:guid}/cycles")]
 public class ContributionCyclesController(
     IContributionCycleRepository cycles,
-    IStokvelRepository stokvels) : RondiControllerBase
+    IStokvelRepository stokvels,
+    IContributionQueries queries,        
+    IWebHostEnvironment env) : RondiControllerBase  
 {
     /// <summary>Lists a stokvel's contribution cycles.</summary>
     [HttpGet]
@@ -33,6 +35,31 @@ public class ContributionCyclesController(
         if (cycle is null || cycle.StokvelId != stokvelId)
             throw new DomainNotFoundException($"Cycle {id} was not found.");
         return Ok(cycle.ToResponse());
+    }
+
+    // New endpoint GET /api/stokvels/{stokvelId}/cycles/{cycleId}/contributions
+    /// <summary>Lists the contributions recorded for a cycle, with each member's details.</summary>
+    [HttpGet("{cycleId:guid}/contributions")]
+    [ProducesResponseType(typeof(IReadOnlyList<ContributionDetailResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<IReadOnlyList<ContributionDetailResponse>>> GetContributions(
+        Guid stokvelId, Guid cycleId, [FromQuery] string strategy = "projection")
+    {
+        var cycle = await cycles.GetByIdAsync(cycleId);
+        if (cycle is null || cycle.StokvelId != stokvelId)
+            throw new DomainNotFoundException($"Cycle {cycleId} was not found.");
+
+        // The strategy switch exists only so the three versions can be measured in Development.
+        // Outside Development it is ignored and the shipped version (projection) always runs.
+        var chosen = env.IsDevelopment() ? strategy.ToLowerInvariant() : "projection";
+
+        var result = chosen switch
+        {
+            "naive" => await queries.GetForCycleNaiveAsync(stokvelId, cycleId),
+            "include" => await queries.GetForCycleIncludeAsync(stokvelId, cycleId),
+            _ => await queries.GetForCycleProjectedAsync(stokvelId, cycleId)
+        };
+        return Ok(result);
     }
 
     /// <summary>Creates a new contribution cycle for a stokvel.</summary>
