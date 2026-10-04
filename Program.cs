@@ -29,14 +29,16 @@ builder.Services.AddDbContext<RondiTrackDbContext>(o =>
         maxRetryDelay: TimeSpan.FromSeconds(10),
         errorCodesToAdd: null)));
 
-// Still in-memory on purpose (not swapped yet)
-builder.Services.AddSingleton<IUserRepository, InMemoryUserRepository>();
-builder.Services.AddSingleton<IStokvelRepository, InMemoryStokvelRepository>();
-builder.Services.AddSingleton<IContributionCycleRepository, InMemoryContributionCycleRepository>();
+// Still in-memory on purpose (not part of today's work)
 builder.Services.AddSingleton<IIdempotencyStore, InMemoryIdempotencyStore>();
 
-// Swapped to EF Core: Scoped, because a DbContext lives for one request
+// Everything below is EF Core now. Scoped, because a DbContext lives for one request
+builder.Services.AddScoped<IUserRepository, EfUserRepository>();
+builder.Services.AddScoped<IStokvelRepository, EfStokvelRepository>();
+builder.Services.AddScoped<IContributionCycleRepository, EfContributionCycleRepository>();
 builder.Services.AddScoped<IContributionRepository, EfContributionRepository>();
+builder.Services.AddScoped<IStokvelMemberRepository, EfStokvelMemberRepository>();   // EDIT 5.2: new
+builder.Services.AddScoped<IContributionQueries, ContributionQueries>();               // EDIT 5.2: new
 
 builder.Services.AddScoped<IStokvelMembershipService, StokvelMembershipService>();
 builder.Services.AddScoped<IContributionService, ContributionService>();
@@ -45,6 +47,14 @@ builder.Services.AddScoped<IPayoutFaultHook, NoOpPayoutFaultHook>();
 builder.Services.AddScoped<IPayoutService, PayoutService>();
 
 var app = builder.Build();
+
+// Put the demo data into Postgres (Development only, needs the migration applied first)
+if (app.Environment.IsDevelopment())
+{
+    using var scope = app.Services.CreateScope();
+    var db = scope.ServiceProvider.GetRequiredService<RondiTrackDbContext>();
+    await SeedData.EnsureSeededAsync(db);
+}
 
 app.UseExceptionHandler();
 

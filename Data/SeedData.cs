@@ -1,3 +1,4 @@
+using Microsoft.EntityFrameworkCore;
 using RondiTrack.Domain;
 
 namespace RondiTrack.Data;
@@ -30,5 +31,36 @@ internal static class SeedData
 
         Users = [thandi, sipho, lerato, kagiso, naledi, bongani];
         Stokvels = [ubuntu, grocery];
+    }
+
+    // New method. Puts the demo data into Postgres once (Development only)
+    public static async Task EnsureSeededAsync(RondiTrackDbContext db)
+    {
+        if (await db.Users.AnyAsync()) return;
+
+        try
+        {
+            // Fresh objects, so parallel hosts never share tracked instances
+            var users = Users.Select(u => new User(u.Id, u.FullName, u.Email)).ToList();
+            var stokvels = Stokvels
+                .Select(s => new Stokvel(s.Id, s.Name, s.ContributionAmount, s.Frequency, s.MaxMembers))
+                .ToList();
+
+            db.Users.AddRange(users);
+            db.Stokvels.AddRange(stokvels);
+            await db.SaveChangesAsync(); // parents first
+
+            foreach (var s in Stokvels)
+            {
+                var position = 1;
+                foreach (var member in s.Members)
+                    db.StokvelMembers.Add(new StokvelMember(s.Id, member.Id, position++));
+            }
+            await db.SaveChangesAsync();
+        }
+        catch (DbUpdateException)
+        {
+            // another test host seeded at the same moment, nothing to do
+        }
     }
 }

@@ -21,7 +21,11 @@ public interface IPayoutService
     Task<PayoutResponse> ProcessNextPayoutAsync(Guid stokvelId, Guid cycleId, CancellationToken ct = default);
 }
 
-public sealed class PayoutService(RondiTrackDbContext db, IPayoutFaultHook faultHook) : IPayoutService
+// EDIT 5.2: now also receives IStokvelMemberRepository (members are no longer read straight from the DbContext)
+public sealed class PayoutService(
+    RondiTrackDbContext db,
+    IPayoutFaultHook faultHook,
+    IStokvelMemberRepository members) : IPayoutService
 {
     public async Task<PayoutResponse> ProcessNextPayoutAsync(
         Guid stokvelId, Guid cycleId, CancellationToken ct = default)
@@ -36,6 +40,7 @@ public sealed class PayoutService(RondiTrackDbContext db, IPayoutFaultHook fault
             await using var tx = await db.Database.BeginTransactionAsync(ct);
             try
             {
+                // Stays TRACKED on purpose, because we change its status and save below
                 var cycle = await db.ContributionCycles
                     .FirstOrDefaultAsync(c => c.Id == cycleId && c.StokvelId == stokvelId, ct)
                     ?? throw new DomainNotFoundException(
@@ -44,14 +49,15 @@ public sealed class PayoutService(RondiTrackDbContext db, IPayoutFaultHook fault
                 if (cycle.Status != CycleStatus.Open)
                     throw new DomainConflictException("This cycle has already been paid out.");
 
-                var paidMemberIds = db.Payouts
+                // Payouts now record the recipient's UserId (not a StokvelMember.Id)
+                var paidUserIds = await db.Payouts
                     .Where(p => p.StokvelId == stokvelId)
-                    .Select(p => p.RecipientMemberId);
+                    .Select(p => p.RecipientUserId)
+                    .ToListAsync(ct);
 
-                var next = await db.StokvelMembers
-                    .Where(m => m.StokvelId == stokvelId && !paidMemberIds.Contains(m.Id))
-                    .OrderBy(m => m.RotationPosition)
-                    .FirstOrDefaultAsync(ct)
+                // EDIT 5.2: read-only (untracked) through the dedicated repository, already ordered by rotation
+                var next = (await members.GetByStokvelAsync(stokvelId))
+                    .FirstOrDefault(m => !paidUserIds.Contains(m.UserId))
                     ?? throw new DomainConflictException("Every member has already been paid in this rotation.");
 
                 var total = await db.Contributions
@@ -61,7 +67,7 @@ public sealed class PayoutService(RondiTrackDbContext db, IPayoutFaultHook fault
                 if (total <= 0)
                     throw new DomainConflictException("No contributions have been recorded for this cycle.");
 
-                var payout = new Payout(stokvelId, cycleId, next.Id, total);
+                var payout = new Payout(stokvelId, cycleId, next.UserId, total);   // EDIT 5.2: next.UserId
                 db.Payouts.Add(payout);
                 await db.SaveChangesAsync(ct);          // write 1: the payout
 
@@ -74,7 +80,7 @@ public sealed class PayoutService(RondiTrackDbContext db, IPayoutFaultHook fault
 
                 return new PayoutResponse(
                     payout.Id, payout.StokvelId, payout.CycleId,
-                    payout.RecipientMemberId, payout.Amount, payout.PaidAtUtc);
+                    payout.RecipientUserId, payout.Amount, payout.PaidAtUtc);   // EDIT 5.2
             }
             catch
             {
