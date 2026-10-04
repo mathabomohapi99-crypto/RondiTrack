@@ -31,24 +31,33 @@ public class PayoutTransactionTests
         return new RondiTrackDbContext(options);
     }
 
-    // Fresh GUIDs every time, so tests never collide with rows left by earlier runs
-    private static async Task<(Guid StokvelId, Guid CycleId, Guid FirstMemberId)> SeedAsync()
+    // EDIT 5.2: with real foreign keys the parents (users, stokvel) must be saved BEFORE members, cycle and contributions.
+    // It now returns the first member's UserId (StokvelMember has no Id any more).
+    private static async Task<(Guid StokvelId, Guid CycleId, Guid FirstUserId)> SeedAsync()
     {
         using var db = NewDb();
 
-        var stokvelId = Guid.NewGuid();
-        var cycle = new ContributionCycle(stokvelId, 1, 200m);
-        var first = new StokvelMember(stokvelId, Guid.NewGuid(), 1);
-        var second = new StokvelMember(stokvelId, Guid.NewGuid(), 2);
+        var stokvel = new Stokvel($"Payout Test {Guid.NewGuid()}", 100m, ContributionFrequency.Monthly, 5);
+        var user1 = new User("Payout One", $"p1-{Guid.NewGuid()}@example.com");
+        var user2 = new User("Payout Two", $"p2-{Guid.NewGuid()}@example.com");
+        var cycle = new ContributionCycle(stokvel.Id, 1, 200m);
 
+        db.Users.AddRange(user1, user2);
+        db.Stokvels.Add(stokvel);
+        await db.SaveChangesAsync();                       // parents first
+
+        db.StokvelMembers.AddRange(
+            new StokvelMember(stokvel.Id, user1.Id, 1),
+            new StokvelMember(stokvel.Id, user2.Id, 2));
         db.ContributionCycles.Add(cycle);
-        db.StokvelMembers.AddRange(first, second);
-        db.Contributions.AddRange(
-            new Contribution(stokvelId, first.UserId, cycle.Id, 100m),
-            new Contribution(stokvelId, second.UserId, cycle.Id, 100m));
+        await db.SaveChangesAsync();                       // then members and cycle
 
-        await db.SaveChangesAsync();
-        return (stokvelId, cycle.Id, first.Id);
+        db.Contributions.AddRange(
+            new Contribution(stokvel.Id, user1.Id, cycle.Id, 100m),
+            new Contribution(stokvel.Id, user2.Id, cycle.Id, 100m));
+        await db.SaveChangesAsync();                       // then contributions
+
+        return (stokvel.Id, cycle.Id, user1.Id);
     }
 
     [Fact]
@@ -58,7 +67,8 @@ public class PayoutTransactionTests
 
         using (var db = NewDb())
         {
-            var service = new PayoutService(db, new ThrowingHook());
+            // EDIT 5.2: PayoutService now takes the member repository too
+            var service = new PayoutService(db, new ThrowingHook(), new EfStokvelMemberRepository(db));
             await Assert.ThrowsAsync<InvalidOperationException>(
                 () => service.ProcessNextPayoutAsync(stokvelId, cycleId));
         }
@@ -74,14 +84,14 @@ public class PayoutTransactionTests
     [Fact]
     public async Task ProcessNextPayout_PaysTheFirstMemberInRotationAndMarksTheCyclePaidOut()
     {
-        var (stokvelId, cycleId, firstMemberId) = await SeedAsync();
+        var (stokvelId, cycleId, firstUserId) = await SeedAsync();
 
         using (var db = NewDb())
         {
-            var result = await new PayoutService(db, new NoOpPayoutFaultHook())
+            var result = await new PayoutService(db, new NoOpPayoutFaultHook(), new EfStokvelMemberRepository(db))
                 .ProcessNextPayoutAsync(stokvelId, cycleId);
 
-            Assert.Equal(firstMemberId, result.RecipientMemberId);
+            Assert.Equal(firstUserId, result.RecipientUserId);   // EDIT 5.2: was RecipientMemberId
             Assert.Equal(200m, result.Amount);
         }
 
