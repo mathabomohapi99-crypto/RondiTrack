@@ -11,6 +11,9 @@ public sealed class User
     public string Email { get; private set; }
     public DateTime CreatedAtUtc { get; private set; }
 
+    // Real navigation, one user has many memberships
+    public List<StokvelMember> Memberships { get; } = [];
+
     private User() { FullName = null!; Email = null!; } // for EF Core only
 
     public User(string fullName, string email)

@@ -30,18 +30,30 @@ public class RondiTrackDbContext : DbContext
             e.Property(s => s.ContributionAmount).HasPrecision(18, 2);
             e.Property(s => s.Frequency).HasConversion<string>().HasMaxLength(20);
 
-            // Members is a read-only wrapper over a private list, so EF Core cannot fill it.
-            // Membership is persisted through StokvelMember instead.
+            // Members is a read-only wrapper over a private list of Users, so EF Core cannot fill it.
+            // Membership is persisted through StokvelMember (the Memberships navigation) instead.
             e.Ignore(s => s.Members);
             e.Ignore(s => s.PayoutPerCycle); // calculated
             e.Ignore(s => s.IsFull);         // calculated
         });
 
+        // StokvelMember now has a COMPOSITE primary key and two real relationships
         b.Entity<StokvelMember>(e =>
         {
-            e.HasKey(m => m.Id);
-            e.HasIndex(m => new { m.StokvelId, m.UserId }).IsUnique();
+            e.HasKey(m => new { m.UserId, m.StokvelId });   // composite natural key
+            e.Property(m => m.Role).HasConversion<string>().HasMaxLength(20);
+            // the old unique index on (StokvelId, UserId) is removed: the primary key does that job now
             e.HasIndex(m => new { m.StokvelId, m.RotationPosition }).IsUnique();
+
+            e.HasOne(m => m.User)
+             .WithMany(u => u.Memberships)
+             .HasForeignKey(m => m.UserId)
+             .OnDelete(DeleteBehavior.Restrict);
+
+            e.HasOne(m => m.Stokvel)
+             .WithMany(s => s.Memberships)
+             .HasForeignKey(m => m.StokvelId)
+             .OnDelete(DeleteBehavior.Cascade);
         });
 
         b.Entity<ContributionCycle>(e =>
@@ -50,6 +62,12 @@ public class RondiTrackDbContext : DbContext
             e.Property(c => c.TargetAmount).HasPrecision(18, 2);
             e.Property(c => c.Status).HasConversion<string>().HasMaxLength(20);
             e.HasIndex(c => new { c.StokvelId, c.CycleNumber });
+
+            // The second one-to-many (Stokvel -> ContributionCycle)
+            e.HasOne(c => c.Stokvel)
+             .WithMany(s => s.Cycles)
+             .HasForeignKey(c => c.StokvelId)
+             .OnDelete(DeleteBehavior.Cascade);
         });
 
         b.Entity<Contribution>(e =>
@@ -57,6 +75,12 @@ public class RondiTrackDbContext : DbContext
             e.HasKey(c => c.Id);
             e.Property(c => c.Amount).HasPrecision(18, 2);
             e.HasIndex(c => new { c.CycleId, c.UserId });
+
+            // Composite foreign key to ONE specific membership (same order as the primary key)
+            e.HasOne(c => c.Member)
+             .WithMany(m => m.Contributions)
+             .HasForeignKey(c => new { c.UserId, c.StokvelId })
+             .OnDelete(DeleteBehavior.Restrict);
         });
 
         b.Entity<Payout>(e =>
@@ -64,6 +88,12 @@ public class RondiTrackDbContext : DbContext
             e.HasKey(p => p.Id);
             e.Property(p => p.Amount).HasPrecision(18, 2);
             e.HasIndex(p => p.CycleId).IsUnique(); // a cycle can only be paid out once
+
+            // EDIT 5.2: the recipient is one specific membership (composite foreign key, no navigation property)
+            e.HasOne<StokvelMember>()
+             .WithMany()
+             .HasForeignKey(p => new { p.RecipientUserId, p.StokvelId })
+             .OnDelete(DeleteBehavior.Restrict);
         });
     }
 }

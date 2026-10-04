@@ -9,6 +9,9 @@ public sealed class ContributionCycle
     public CycleStatus Status { get; private set; } = CycleStatus.Open;
     public DateTime CreatedAtUtc { get; private set; }
 
+    // Real navigation (the second one-to-many: Stokvel -> ContributionCycle)
+    public Stokvel Stokvel { get; private set; } = null!;
+
     private ContributionCycle() { } // for EF Core only
 
     public ContributionCycle(Guid stokvelId, int cycleNumber, decimal targetAmount)

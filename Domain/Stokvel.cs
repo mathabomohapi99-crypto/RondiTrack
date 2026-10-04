@@ -20,6 +20,10 @@ public sealed class Stokvel
     public decimal PayoutPerCycle => ContributionAmount * _members.Count;
     public bool IsFull => _members.Count >= MaxMembers;
 
+    // The real EF Core navigations (Members above stays for the business rules)
+    public List<StokvelMember> Memberships { get; } = [];
+    public List<ContributionCycle> Cycles { get; } = [];
+
     private Stokvel() { Name = null!; } // for EF Core only
 
     public Stokvel(string name, decimal contributionAmount, ContributionFrequency frequency, int maxMembers)
@@ -37,6 +41,13 @@ public sealed class Stokvel
         : this(name, contributionAmount, frequency, maxMembers)
     {
         Id = id;
+    }
+
+    // Used by EfStokvelRepository to fill the member list after loading from the database
+    internal void LoadMembers(IEnumerable<User> users)
+    {
+        _members.Clear();
+        _members.AddRange(users);
     }
 
     public void UpdateDetails(string name, decimal contributionAmount,

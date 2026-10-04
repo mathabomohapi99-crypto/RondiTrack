@@ -5,9 +5,12 @@ public sealed class Contribution
     public Guid Id { get; private set; }
     public Guid StokvelId { get; private set; }
     public Guid UserId { get; private set; }
-    public Guid CycleId { get; private set; }
+    public Guid CycleId { get; private set; }   // stays a bare Guid on purpose (a stated "not yet")
     public decimal Amount { get; private set; }
     public DateTime RecordedAtUtc { get; private set; }
+
+    // Points at ONE specific membership (composite foreign key UserId + StokvelId)
+    public StokvelMember Member { get; private set; } = null!;
 
     private Contribution() { } // for EF Core only
 
