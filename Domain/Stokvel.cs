@@ -16,6 +16,9 @@ public sealed class Stokvel
     public int MaxMembers { get; private set; }
     public DateTime CreatedAtUtc { get; private set; }
 
+    // ADDED 5.3: PostgreSQL's built-in row version (xmin). Not a real column.
+    public uint Version { get; private set; }
+
     public IReadOnlyCollection<User> Members => _members.AsReadOnly();
     public decimal PayoutPerCycle => ContributionAmount * _members.Count;
     public bool IsFull => _members.Count >= MaxMembers;
@@ -49,6 +52,9 @@ public sealed class Stokvel
         _members.Clear();
         _members.AddRange(users);
     }
+
+    // ADDED 5.3: "the client last saw THIS version". Called before saving an update from a PUT.
+    public void SetExpectedVersion(uint version) => Version = version;
 
     public void UpdateDetails(string name, decimal contributionAmount,
         ContributionFrequency frequency, int maxMembers)

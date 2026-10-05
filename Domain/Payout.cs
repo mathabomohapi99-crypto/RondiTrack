@@ -11,6 +11,9 @@ public sealed class Payout
     public decimal Amount { get; private set; }
     public DateTime PaidAtUtc { get; private set; }
 
+    // ADDED 5.3: PostgreSQL's built-in row version (xmin). Not a real column, EF reads it from the system column.
+    public uint Version { get; private set; }
+
     private Payout() { } // for EF Core only
 
     public Payout(Guid stokvelId, Guid cycleId, Guid recipientUserId, decimal amount)

@@ -9,6 +9,9 @@ public sealed class ContributionCycle
     public CycleStatus Status { get; private set; } = CycleStatus.Open;
     public DateTime CreatedAtUtc { get; private set; }
 
+    // ADDED 5.3: PostgreSQL's built-in row version (xmin). Not a real column.
+    public uint Version { get; private set; }
+
     // Real navigation (the second one-to-many: Stokvel -> ContributionCycle)
     public Stokvel Stokvel { get; private set; } = null!;
 
@@ -27,6 +30,9 @@ public sealed class ContributionCycle
         TargetAmount = targetAmount;
         CreatedAtUtc = DateTime.UtcNow;
     }
+
+    // ADDED 5.3: "the client last saw THIS version". Called before saving an update from a PUT.
+    public void SetExpectedVersion(uint version) => Version = version;
 
     public void UpdateDetails(int cycleNumber, decimal targetAmount)
     {

@@ -11,6 +11,9 @@ public sealed class User
     public string Email { get; private set; }
     public DateTime CreatedAtUtc { get; private set; }
 
+    // ADDED 5.3: PostgreSQL's built-in row version (xmin). Not a real column.
+    public uint Version { get; private set; }
+
     // Real navigation, one user has many memberships
     public List<StokvelMember> Memberships { get; } = [];
 
@@ -28,6 +31,9 @@ public sealed class User
     {
         Id = id;
     }
+
+    // ADDED 5.3: "the client last saw THIS version". Called before saving an update from a PUT.
+    public void SetExpectedVersion(uint version) => Version = version;
 
     public void UpdateDetails(string fullName, string email)
     {

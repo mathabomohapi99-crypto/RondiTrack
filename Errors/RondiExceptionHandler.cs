@@ -1,6 +1,10 @@
 using FluentValidation;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using Npgsql;
+using RondiTrack.Api.Common.Paging;
+using RondiTrack.Common;
 using RondiTrack.Domain;
 using System.Text.Json;
 
@@ -45,6 +49,44 @@ public sealed class RondiExceptionHandler(ILogger<RondiExceptionHandler> logger)
             status = StatusCodes.Status400BadRequest;
             title = "Bad Request";
             detail = exception.Message;
+        }
+        // ADDED 5.3: bad paging / sort / filter / token input -> 400
+        else if (exception is ApiBadRequestException)
+        {
+            status = StatusCodes.Status400BadRequest;
+            title = "Bad Request";
+            detail = exception.Message;
+        }
+        // ADDED 5.3: update sent without If-Match -> 428
+        else if (exception is PreconditionRequiredException)
+        {
+            status = StatusCodes.Status428PreconditionRequired;
+            title = "Precondition Required";
+            detail = exception.Message;
+        }
+        // ADDED 5.3: xmin token was stale. If the client sent If-Match, the precondition failed (412).
+        // If there was no If-Match (a race inside the server, e.g. two payouts at once), it is a plain 409.
+        else if (exception is DbUpdateConcurrencyException)
+        {
+            if (httpContext.Request.Headers.ContainsKey("If-Match"))
+            {
+                status = StatusCodes.Status412PreconditionFailed;
+                title = "Precondition Failed";
+                detail = "This record was changed by someone else since you loaded it. Reload it and try again.";
+            }
+            else
+            {
+                status = StatusCodes.Status409Conflict;
+                title = "Conflict";
+                detail = "This record was changed by someone else at the same time. Reload it and try again.";
+            }
+        }
+        // ADDED 5.3: a database unique constraint fired (SQLSTATE 23505) -> 409 instead of 500
+        else if (exception is DbUpdateException { InnerException: PostgresException { SqlState: PostgresErrorCodes.UniqueViolation } })
+        {
+            status = StatusCodes.Status409Conflict;
+            title = "Conflict";
+            detail = "That record already exists (it would break a uniqueness rule).";
         }
 
         logger.LogError(exception, "Request failed with status {Status}. CorrelationId: {CorrelationId}", status, correlationId);
