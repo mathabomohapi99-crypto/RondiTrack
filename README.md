@@ -387,10 +387,7 @@ ORDER BY c0."RecordedAtUtc", c0."Id"
 ```
 `WHERE`, `ORDER BY` and `LIMIT` are all in the SQL text. EF Core even applies them to `Contributions` first and joins afterwards.
 
-**SQL evidence for the paged members endpoint** (`GET /api/stokvels/{id}/members?pageSize=10`):
-```sql
-<<paste the Executed DbCommand entry that has FROM "StokvelMembers" and LIMIT from your console>>
-```
+**SQL evidence for the paged members endpoint:** not captured. The query is built as IQueryable (WHERE, ORDER BY, Take) in `MemberPagingService`, but I did not record the logged SQL for it. Only the contributions endpoint has log evidence above.
 
 ## 2. Pagination contract (modelled on AIP-158)
 Applied to `GET /api/stokvels/{id}/cycles/{cycleId}/contributions` and `GET /api/stokvels/{id}/members`.
@@ -639,3 +636,4 @@ The other tests (idempotency, member limits, contributions, validation) were una
 - The idempotency store is still in memory (`InMemoryIdempotencyStore`), so it does not protect across several server instances. Out of scope for today.
 - Page tokens are opaque but not signed. A client could forge one, but it can only change its own position inside data the endpoint would already return.
 - `amount` sorting is not covered by an index.
+- The logged SQL for the paged members endpoint was not captured (see section 1).
