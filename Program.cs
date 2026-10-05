@@ -24,10 +24,16 @@ var connectionString = builder.Configuration.GetConnectionString("RondiTrack")
         "Set ConnectionStrings:RondiTrack with dotnet user-secrets.");
 
 builder.Services.AddDbContext<RondiTrackDbContext>(o =>
+{
     o.UseNpgsql(connectionString, n => n.EnableRetryOnFailure(
         maxRetryCount: 4,
         maxRetryDelay: TimeSpan.FromSeconds(10),
-        errorCodesToAdd: null)));
+        errorCodesToAdd: null));
+
+    // ADDED 5.3: Development only. Shows real parameter values in the SQL log,
+    // so the logged SQL can be pasted straight into EXPLAIN ANALYZE.
+    o.EnableSensitiveDataLogging(builder.Environment.IsDevelopment());
+});
 
 // Still in-memory on purpose (not part of today's work)
 builder.Services.AddSingleton<IIdempotencyStore, InMemoryIdempotencyStore>();
@@ -40,6 +46,10 @@ builder.Services.AddScoped<IContributionRepository, EfContributionRepository>();
 builder.Services.AddScoped<IStokvelMemberRepository, EfStokvelMemberRepository>();   // EDIT 5.2: new
 builder.Services.AddScoped<IContributionQueries, ContributionQueries>();               // EDIT 5.2: new
 
+// ADDED 5.3: the two paging services
+builder.Services.AddScoped<ContributionPagingService>();
+builder.Services.AddScoped<MemberPagingService>();
+
 builder.Services.AddScoped<IStokvelMembershipService, StokvelMembershipService>();
 builder.Services.AddScoped<IContributionService, ContributionService>();
 
@@ -47,6 +57,17 @@ builder.Services.AddScoped<IPayoutFaultHook, NoOpPayoutFaultHook>();
 builder.Services.AddScoped<IPayoutService, PayoutService>();
 
 var app = builder.Build();
+
+// ADDED 5.3: volume seeding only runs when you ask for it:  dotnet run -- --seed-volume
+// It never runs on normal startup. It applies migrations first, seeds, then stops (no web server).
+if (args.Contains("--seed-volume"))
+{
+    using var volumeScope = app.Services.CreateScope();
+    var volumeDb = volumeScope.ServiceProvider.GetRequiredService<RondiTrackDbContext>();
+    await volumeDb.Database.MigrateAsync();
+    await VolumeSeeder.RunAsync(volumeDb);
+    return;
+}
 
 // Put the demo data into Postgres (Development only, needs the migration applied first)
 if (app.Environment.IsDevelopment())

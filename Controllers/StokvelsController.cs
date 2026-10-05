@@ -1,4 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
+using RondiTrack.Api.Common.Paging;
+using RondiTrack.Common;
 using RondiTrack.Data;
 using RondiTrack.Domain;
 using RondiTrack.Dtos;
@@ -10,7 +12,8 @@ namespace RondiTrack.Controllers;
 public class StokvelsController(
     IStokvelRepository stokvels,
     IStokvelMembershipService membershipService,
-    IContributionService contributionService) : RondiControllerBase
+    IContributionService contributionService,
+    MemberPagingService memberPaging) : RondiControllerBase   // CHANGED 5.3: new paging service
 {
     /// <summary>Lists all stokvels.</summary>
     [HttpGet]
@@ -21,13 +24,14 @@ public class StokvelsController(
         return Ok(all.Select(s => s.ToResponse()));
     }
 
-    /// <summary>Gets a single stokvel by id.</summary>
+    /// <summary>Gets a single stokvel by id. The ETag header is the concurrency token.</summary>
     [HttpGet("{id:guid}")]
     [ProducesResponseType(typeof(StokvelResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
     public async Task<ActionResult<StokvelResponse>> GetById(Guid id)
     {
         var stokvel = await stokvels.GetByIdAsync(id) ?? throw new DomainNotFoundException($"Stokvel {id} was not found.");
+        ETagHelper.Set(Response, stokvel.Version);   // ADDED 5.3: token leaves the server
         return Ok(stokvel.ToResponse());
     }
 
@@ -39,20 +43,30 @@ public class StokvelsController(
     {
         var stokvel = new Stokvel(request.Name, request.ContributionAmount, request.Frequency, request.MaxMembers);
         await stokvels.AddAsync(stokvel);
+
+        ETagHelper.Set(Response, stokvel.Version);   // ADDED 5.3
         return CreatedAtAction(nameof(GetById), new { id = stokvel.Id }, stokvel.ToResponse());
     }
 
-    /// <summary>Updates a stokvel's details. Capacity cannot drop below the current member count.</summary>
+    /// <summary>Updates a stokvel's details. Requires the If-Match header (ETag from GET).</summary>
     [HttpPut("{id:guid}")]
     [ProducesResponseType(typeof(StokvelResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
-    public async Task<ActionResult<StokvelResponse>> Update(Guid id, StokvelRequest request)
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status412PreconditionFailed)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status428PreconditionRequired)]
+    public async Task<ActionResult<StokvelResponse>> Update(
+        Guid id, StokvelRequest request, [FromHeader(Name = "If-Match")] string? ifMatch)
     {
+        var expectedVersion = ETagHelper.ParseIfMatch(ifMatch);   // ADDED 5.3: the token is required
+
         var stokvel = await stokvels.GetByIdAsync(id) ?? throw new DomainNotFoundException($"Stokvel {id} was not found.");
         stokvel.UpdateDetails(request.Name, request.ContributionAmount, request.Frequency, request.MaxMembers);
+        stokvel.SetExpectedVersion(expectedVersion);   // ADDED 5.3: use the version the CLIENT saw
         await stokvels.UpdateAsync(stokvel);
+
+        ETagHelper.Set(Response, stokvel.Version);     // ADDED 5.3: hand back the new token
         return Ok(stokvel.ToResponse());
     }
 
@@ -67,14 +81,20 @@ public class StokvelsController(
         return NoContent();
     }
 
-    /// <summary>Lists a stokvel's members.</summary>
+    /// <summary>
+    /// Lists a stokvel's members in rotation order. CHANGED 5.3: paged in the database.
+    /// Query: pageSize, pageToken.
+    /// </summary>
     [HttpGet("{id:guid}/members")]
-    [ProducesResponseType(typeof(IReadOnlyCollection<UserResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(PagedResponse<UserResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
-    public async Task<ActionResult<IReadOnlyCollection<UserResponse>>> GetMembers(Guid id)
+    public async Task<ActionResult<PagedResponse<UserResponse>>> GetMembers(
+        Guid id, [FromQuery] int? pageSize, [FromQuery] string? pageToken, CancellationToken ct)
     {
-        var stokvel = await stokvels.GetByIdAsync(id) ?? throw new DomainNotFoundException($"Stokvel {id} was not found.");
-        return Ok(stokvel.Members.Select(m => m.ToResponse()));
+        var result = await memberPaging.ListAsync(id, pageSize, pageToken, ct)
+            ?? throw new DomainNotFoundException($"Stokvel {id} was not found.");
+        return Ok(result);
     }
 
     /// <summary>Gets a single member of a stokvel.</summary>

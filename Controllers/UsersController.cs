@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using RondiTrack.Common;
 using RondiTrack.Data;
 using RondiTrack.Domain;
 using RondiTrack.Dtos;
@@ -17,13 +18,14 @@ public class UsersController(IUserRepository users, IStokvelRepository stokvels)
         return Ok(all.Select(u => u.ToResponse()));
     }
 
-    /// <summary>Gets a single user by id.</summary>
+    /// <summary>Gets a single user by id. The ETag header is the concurrency token.</summary>
     [HttpGet("{id:guid}")]
     [ProducesResponseType(typeof(UserResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
     public async Task<ActionResult<UserResponse>> GetById(Guid id)
     {
         var user = await users.GetByIdAsync(id) ?? throw new DomainNotFoundException($"User {id} was not found.");
+        ETagHelper.Set(Response, user.Version);   // ADDED 5.3: token leaves the server
         return Ok(user.ToResponse());
     }
 
@@ -40,24 +42,34 @@ public class UsersController(IUserRepository users, IStokvelRepository stokvels)
             throw new DomainConflictException($"A user with email '{user.Email}' already exists.");
 
         await users.AddAsync(user);
+
+        ETagHelper.Set(Response, user.Version);   // ADDED 5.3
         return CreatedAtAction(nameof(GetById), new { id = user.Id }, user.ToResponse());
     }
 
-    /// <summary>Updates an existing user's name and email.</summary>
+    /// <summary>Updates a user's name and email. Requires the If-Match header (ETag from GET).</summary>
     [HttpPut("{id:guid}")]
     [ProducesResponseType(typeof(UserResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
-    public async Task<ActionResult<UserResponse>> Update(Guid id, UserRequest request)
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status412PreconditionFailed)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status428PreconditionRequired)]
+    public async Task<ActionResult<UserResponse>> Update(
+        Guid id, UserRequest request, [FromHeader(Name = "If-Match")] string? ifMatch)
     {
+        var expectedVersion = ETagHelper.ParseIfMatch(ifMatch);   // ADDED 5.3: the token is required
+
         var user = await users.GetByIdAsync(id) ?? throw new DomainNotFoundException($"User {id} was not found.");
 
         if (await users.EmailExistsAsync(request.Email, excludingUserId: id))
             throw new DomainConflictException($"A user with email '{request.Email.Trim()}' already exists.");
 
         user.UpdateDetails(request.FullName, request.Email);
+        user.SetExpectedVersion(expectedVersion);   // ADDED 5.3: use the version the CLIENT saw
         await users.UpdateAsync(user);
+
+        ETagHelper.Set(Response, user.Version);     // ADDED 5.3: hand back the new token
         return Ok(user.ToResponse());
     }
 

@@ -1,7 +1,10 @@
 using Microsoft.AspNetCore.Mvc;
+using RondiTrack.Api.Common.Paging;
+using RondiTrack.Common;
 using RondiTrack.Data;
 using RondiTrack.Domain;
 using RondiTrack.Dtos;
+using RondiTrack.Services;
 
 namespace RondiTrack.Controllers;
 
@@ -9,8 +12,7 @@ namespace RondiTrack.Controllers;
 public class ContributionCyclesController(
     IContributionCycleRepository cycles,
     IStokvelRepository stokvels,
-    IContributionQueries queries,        
-    IWebHostEnvironment env) : RondiControllerBase  
+    ContributionPagingService contributionPaging) : RondiControllerBase   // CHANGED 5.3: paging service replaces the strategy switch
 {
     /// <summary>Lists a stokvel's contribution cycles.</summary>
     [HttpGet]
@@ -25,7 +27,7 @@ public class ContributionCyclesController(
         return Ok(all.Select(c => c.ToResponse()));
     }
 
-    /// <summary>Gets a single contribution cycle.</summary>
+    /// <summary>Gets a single contribution cycle. The ETag header is the concurrency token.</summary>
     [HttpGet("{id:guid}")]
     [ProducesResponseType(typeof(ContributionCycleResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
@@ -34,32 +36,28 @@ public class ContributionCyclesController(
         var cycle = await cycles.GetByIdAsync(id);
         if (cycle is null || cycle.StokvelId != stokvelId)
             throw new DomainNotFoundException($"Cycle {id} was not found.");
+
+        ETagHelper.Set(Response, cycle.Version);   // ADDED 5.3: token leaves the server
         return Ok(cycle.ToResponse());
     }
 
-    // New endpoint GET /api/stokvels/{stokvelId}/cycles/{cycleId}/contributions
-    /// <summary>Lists the contributions recorded for a cycle, with each member's details.</summary>
+    /// <summary>
+    /// Lists the contributions recorded for a cycle, with each member's details.
+    /// CHANGED 5.3: paged, sortable and filterable. All of it runs in the database.
+    /// Query: pageSize, pageToken, sort (date|-date|amount|-amount), userId, dateFrom, dateTo.
+    /// </summary>
     [HttpGet("{cycleId:guid}/contributions")]
-    [ProducesResponseType(typeof(IReadOnlyList<ContributionDetailResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(PagedResponse<ContributionDetailResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
-    public async Task<ActionResult<IReadOnlyList<ContributionDetailResponse>>> GetContributions(
-        Guid stokvelId, Guid cycleId, [FromQuery] string strategy = "projection")
+    public async Task<ActionResult<PagedResponse<ContributionDetailResponse>>> GetContributions(
+        Guid stokvelId, Guid cycleId, [FromQuery] ContributionListQuery query, CancellationToken ct)
     {
         var cycle = await cycles.GetByIdAsync(cycleId);
         if (cycle is null || cycle.StokvelId != stokvelId)
             throw new DomainNotFoundException($"Cycle {cycleId} was not found.");
 
-        // The strategy switch exists only so the three versions can be measured in Development.
-        // Outside Development it is ignored and the shipped version (projection) always runs.
-        var chosen = env.IsDevelopment() ? strategy.ToLowerInvariant() : "projection";
-
-        var result = chosen switch
-        {
-            "naive" => await queries.GetForCycleNaiveAsync(stokvelId, cycleId),
-            "include" => await queries.GetForCycleIncludeAsync(stokvelId, cycleId),
-            _ => await queries.GetForCycleProjectedAsync(stokvelId, cycleId)
-        };
-        return Ok(result);
+        return Ok(await contributionPaging.ListAsync(cycleId, query, ct));
     }
 
     /// <summary>Creates a new contribution cycle for a stokvel.</summary>
@@ -74,22 +72,33 @@ public class ContributionCyclesController(
 
         var cycle = new ContributionCycle(stokvelId, request.CycleNumber, request.TargetAmount);
         await cycles.AddAsync(cycle);
+
+        ETagHelper.Set(Response, cycle.Version);   // ADDED 5.3
         return CreatedAtAction(nameof(GetById), new { stokvelId, id = cycle.Id }, cycle.ToResponse());
     }
 
-    /// <summary>Updates a contribution cycle's number and target amount.</summary>
+    /// <summary>Updates a cycle's number and target amount. Requires the If-Match header (ETag from GET).</summary>
     [HttpPut("{id:guid}")]
     [ProducesResponseType(typeof(ContributionCycleResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
-    public async Task<ActionResult<ContributionCycleResponse>> Update(Guid stokvelId, Guid id, ContributionCycleRequest request)
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status412PreconditionFailed)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status428PreconditionRequired)]
+    public async Task<ActionResult<ContributionCycleResponse>> Update(
+        Guid stokvelId, Guid id, ContributionCycleRequest request,
+        [FromHeader(Name = "If-Match")] string? ifMatch)
     {
+        var expectedVersion = ETagHelper.ParseIfMatch(ifMatch);   // ADDED 5.3: the token is required
+
         var cycle = await cycles.GetByIdAsync(id);
         if (cycle is null || cycle.StokvelId != stokvelId)
             throw new DomainNotFoundException($"Cycle {id} was not found.");
 
         cycle.UpdateDetails(request.CycleNumber, request.TargetAmount);
+        cycle.SetExpectedVersion(expectedVersion);   // ADDED 5.3: use the version the CLIENT saw, not the one just loaded
         await cycles.UpdateAsync(cycle);
+
+        ETagHelper.Set(Response, cycle.Version);     // ADDED 5.3: hand back the new token
         return Ok(cycle.ToResponse());
     }
 
