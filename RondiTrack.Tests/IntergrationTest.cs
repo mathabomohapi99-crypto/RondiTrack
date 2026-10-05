@@ -126,9 +126,12 @@ public class IntegrationTests(WebApplicationFactory<Program> factory) : IClassFi
     {
         var stokvel = await CreateStokvelAsync(5);
         var response = await _client.GetAsync($"/api/stokvels/{stokvel.Id}/members");
-        var members = await response.Content.ReadFromJsonAsync<List<object>>();
+
+        // EDIT 5.3: the endpoint is paged now, so the body is { items: [], nextPageToken: "" }, not a bare array.
+        var page = await response.Content.ReadFromJsonAsync<MembersPageDto>();
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Empty(members!);
+        Assert.Empty(page!.Items);
+        Assert.Equal("", page.NextPageToken);
     }
 
     [Fact]
@@ -193,4 +196,5 @@ public class IntegrationTests(WebApplicationFactory<Program> factory) : IClassFi
     private sealed record StokvelResponseDto(Guid Id);
     private sealed record UserResponseDto(Guid Id);
     private sealed record CycleResponseDto(Guid Id);
+    private sealed record MembersPageDto(List<object> Items, string NextPageToken);   // ADDED 5.3
 }
