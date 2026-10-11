@@ -1,5 +1,4 @@
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Configuration;
 using RondiTrack.Data;
 using RondiTrack.Domain;
 
@@ -8,15 +7,15 @@ namespace RondiTrack.Tests;
 // NEW 5.3: helpers so tests can talk to PostgreSQL directly with their own DbContexts.
 public static class TestDb
 {
+    // CHANGED 5.4: the factory sets this to the Testcontainers connection string
+    public static string? ConnectionString { get; set; }
+
     // Every call returns a brand new, independent DbContext (own connection, own tracking).
     public static RondiTrackDbContext NewDb()
     {
-        var config = new ConfigurationBuilder()
-            .AddUserSecrets(typeof(Program).Assembly)
-            .Build();
-
-        var connectionString = config.GetConnectionString("RondiTrack")
-            ?? throw new InvalidOperationException("ConnectionStrings:RondiTrack is not set in user secrets.");
+        // CHANGED 5.4: no more user-secrets, so tests can never touch the dev database
+        var connectionString = ConnectionString
+            ?? throw new InvalidOperationException("Test container is not started. Add [Collection(\"Postgres collection\")] to the test class.");
 
         var options = new DbContextOptionsBuilder<RondiTrackDbContext>()
             .UseNpgsql(connectionString, n => n.EnableRetryOnFailure(4, TimeSpan.FromSeconds(10), null))

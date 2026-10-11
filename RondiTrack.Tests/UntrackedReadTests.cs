@@ -1,3 +1,4 @@
+﻿using RondiTrack.Tests.TestSupport;
 using System.Net;
 using System.Net.Http.Json;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -7,7 +8,8 @@ namespace RondiTrack.Tests;
 
 // EDIT 5.2: new file. Proves a PUT still persists now that every read is AsNoTracking
 // EDIT 5.3: the PUT must now send If-Match (the ETag from the POST/GET), otherwise it is a 428.
-public class UntrackedReadTests(WebApplicationFactory<Program> factory) : IClassFixture<WebApplicationFactory<Program>>
+[Collection("Postgres collection")]
+public class UntrackedReadTests(PostgresApiFactory factory)
 {
     private readonly HttpClient _client = factory.CreateClient();
 

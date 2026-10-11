@@ -1,3 +1,4 @@
+﻿using RondiTrack.Tests.TestSupport;
 using System.Net;
 using System.Net.Http.Json;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -5,7 +6,8 @@ using Xunit;
 
 namespace RondiTrack.Tests;
 
-public class ErrorHandlingTests(WebApplicationFactory<Program> factory) : IClassFixture<WebApplicationFactory<Program>>
+[Collection("Postgres collection")]
+public class ErrorHandlingTests(PostgresApiFactory factory)
 {
     private readonly HttpClient _client = factory.CreateClient();
 

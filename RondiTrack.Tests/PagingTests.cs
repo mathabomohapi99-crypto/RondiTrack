@@ -1,3 +1,4 @@
+﻿using RondiTrack.Tests.TestSupport;
 using System.Net;
 using System.Net.Http.Json;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -6,7 +7,8 @@ using Xunit;
 namespace RondiTrack.Tests;
 
 // NEW 5.3: proves the paging contract through the real HTTP endpoint.
-public class PagingTests(WebApplicationFactory<Program> factory) : IClassFixture<WebApplicationFactory<Program>>
+[Collection("Postgres collection")]
+public class PagingTests(PostgresApiFactory factory)
 {
     private readonly HttpClient _client = factory.CreateClient();
 

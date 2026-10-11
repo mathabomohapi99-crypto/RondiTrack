@@ -1,11 +1,11 @@
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Configuration;
 using RondiTrack.Data;
 using RondiTrack.Domain;
 using RondiTrack.Services;
 
 namespace RondiTrack.Tests;
 
+[Collection("Postgres collection")]   // CHANGED 5.4: makes sure the Testcontainers database is started first
 public class PayoutTransactionTests
 {
     // A hook that throws between the two writes, to force a failure mid-transaction
@@ -15,21 +15,8 @@ public class PayoutTransactionTests
             throw new InvalidOperationException("Simulated failure after the payout insert");
     }
 
-    private static RondiTrackDbContext NewDb()
-    {
-        var config = new ConfigurationBuilder()
-            .AddUserSecrets(typeof(Program).Assembly)
-            .Build();
-
-        var connectionString = config.GetConnectionString("RondiTrack")
-            ?? throw new InvalidOperationException("ConnectionStrings:RondiTrack is not set in user secrets.");
-
-        var options = new DbContextOptionsBuilder<RondiTrackDbContext>()
-            .UseNpgsql(connectionString, n => n.EnableRetryOnFailure(4, TimeSpan.FromSeconds(10), null))
-            .Options;
-
-        return new RondiTrackDbContext(options);
-    }
+    // CHANGED 5.4: no more user-secrets, so it uses the Testcontainers database through TestDb
+    private static RondiTrackDbContext NewDb() => TestDb.NewDb();
 
     // EDIT 5.2: with real foreign keys the parents (users, stokvel) must be saved BEFORE members, cycle and contributions.
     // It now returns the first member's UserId (StokvelMember has no Id any more).
