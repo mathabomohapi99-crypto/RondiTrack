@@ -4,12 +4,13 @@
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <UserSecretsId>bbe90fbd-e83b-464c-9efe-0eba0f1e6237</UserSecretsId> <!-- keeps your dev connection string -->
+    <UserSecretsId>bbe90fbd-e83b-464c-9efe-0eba0f1e6237</UserSecretsId> <!-- keeps your dev connection string and the JWT key -->
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="FluentValidation" Version="12.1.1" /> <!-- validators -->
     <PackageReference Include="FluentValidation.DependencyInjectionExtensions" Version="12.1.1" /> <!-- AddValidatorsFromAssembly -->
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.12" /> <!-- NEW 6.1: JWT validation -->
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.3" /> <!-- OpenAPI -->
     <PackageReference Include="Scalar.AspNetCore" Version="2.17.7" /> <!-- API docs UI -->
 
