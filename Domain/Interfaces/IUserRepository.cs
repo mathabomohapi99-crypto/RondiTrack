@@ -4,6 +4,7 @@ public interface IUserRepository   // moved here from Infrastructure/Data/UserRe
 {
     Task<IReadOnlyList<User>> GetAllAsync();
     Task<User?> GetByIdAsync(Guid id);
+    Task<User?> GetByEmailAsync(string email);   // NEW 6.1: used by login
     Task<bool> EmailExistsAsync(string email, Guid? excludingUserId = null);
     Task AddAsync(User user);
     Task UpdateAsync(User user);

@@ -14,6 +14,13 @@ public sealed class EfUserRepository(RondiTrackDbContext db) : IUserRepository
     public async Task<User?> GetByIdAsync(Guid id) =>
         await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == id);
 
+    // NEW 6.1: login looks the user up by the normalised (trimmed, lower-case) email
+    public async Task<User?> GetByEmailAsync(string email)
+    {
+        var normalized = email.Trim().ToLowerInvariant();
+        return await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Email == normalized);
+    }
+
     public Task<bool> EmailExistsAsync(string email, Guid? excludingUserId = null)
     {
         var normalized = email.Trim().ToLowerInvariant();

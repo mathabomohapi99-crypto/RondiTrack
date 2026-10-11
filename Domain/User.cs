@@ -11,6 +11,12 @@ public sealed class User
     public string Email { get; private set; }
     public DateTime CreatedAtUtc { get; private set; }
 
+    // NEW 6.1: the password HASH (never the password). Null for users created without a password.
+    public string? PasswordHash { get; private set; }
+
+    // NEW 6.1: platform-level flag (not per stokvel). Becomes a role claim in the token.
+    public bool IsPlatformAdmin { get; private set; }
+
     // ADDED 5.3: PostgreSQL's built-in row version (xmin). Not a real column.
     public uint Version { get; private set; }
 
@@ -36,6 +42,15 @@ public sealed class User
     // ADDED 5.3: "the client last saw THIS version". Called before saving an update from a PUT.
     public void SetExpectedVersion(uint version) => Version = version;
 
+    // NEW 6.1: stores the hash made by PasswordHasher<User>
+    public void SetPasswordHash(string passwordHash)
+    {
+        if (string.IsNullOrWhiteSpace(passwordHash))
+            throw new DomainValidationException("Password hash is required.");
+
+        PasswordHash = passwordHash;
+    }
+
     public void UpdateDetails(string fullName, string email)
     {
         var validName = ValidateName(fullName);
@@ -56,6 +71,7 @@ public sealed class User
         return trimmed;
     }
 
+    // Emails are trimmed and lower-cased here, so Lerato@X.com and lerato@x.com become the same value
     private static string ValidateEmail(string? email)
     {
         if (string.IsNullOrWhiteSpace(email))

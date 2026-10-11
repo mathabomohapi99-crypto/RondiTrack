@@ -23,6 +23,15 @@ public sealed class InMemoryUserRepository : IUserRepository
         return Task.FromResult<User?>(user);
     }
 
+    // NEW 6.1: needed because the interface has a new method
+    public Task<User?> GetByEmailAsync(string email)
+    {
+        var normalized = email.Trim();
+        var user = _users.Values.FirstOrDefault(u =>
+            string.Equals(u.Email, normalized, StringComparison.OrdinalIgnoreCase));
+        return Task.FromResult<User?>(user);
+    }
+
     public Task<bool> EmailExistsAsync(string email, Guid? excludingUserId = null)
     {
         var normalized = email.Trim();
