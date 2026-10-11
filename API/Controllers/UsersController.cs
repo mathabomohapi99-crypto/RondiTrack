@@ -1,4 +1,6 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using RondiTrack.Auth;
 using RondiTrack.Common;
 using RondiTrack.Data;
 using RondiTrack.Domain;
@@ -7,10 +9,13 @@ using RondiTrack.Dtos;
 namespace RondiTrack.Controllers;
 
 [Route("api/users")]
+[ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status401Unauthorized)]   // NEW 6.1
+[ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]      // NEW 6.1
 public class UsersController(IUserRepository users, IStokvelRepository stokvels) : RondiControllerBase
 {
-    /// <summary>Lists all users.</summary>
+    /// <summary>Lists all users. Platform admins only.</summary>
     [HttpGet]
+    [Authorize(Policy = Policies.PlatformAdmin)]   // NEW 6.1: nobody else may list everyone's emails
     [ProducesResponseType(typeof(IReadOnlyList<UserResponse>), StatusCodes.Status200OK)]
     public async Task<ActionResult<IReadOnlyList<UserResponse>>> GetAll()
     {
@@ -18,8 +23,9 @@ public class UsersController(IUserRepository users, IStokvelRepository stokvels)
         return Ok(all.Select(u => u.ToResponse()));
     }
 
-    /// <summary>Gets a single user by id. The ETag header is the concurrency token.</summary>
+    /// <summary>Gets a user by id (your own account, or platform admin). The ETag header is the concurrency token.</summary>
     [HttpGet("{id:guid}")]
+    [RequireUserSelf]   // NEW 6.1
     [ProducesResponseType(typeof(UserResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
     public async Task<ActionResult<UserResponse>> GetById(Guid id)
@@ -29,8 +35,9 @@ public class UsersController(IUserRepository users, IStokvelRepository stokvels)
         return Ok(user.ToResponse());
     }
 
-    /// <summary>Creates a new user. Email must be unique.</summary>
+    /// <summary>Creates a user without a password. Platform admins only (people sign up with /api/auth/register).</summary>
     [HttpPost]
+    [Authorize(Policy = Policies.PlatformAdmin)]   // NEW 6.1
     [ProducesResponseType(typeof(UserResponse), StatusCodes.Status201Created)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
@@ -47,8 +54,9 @@ public class UsersController(IUserRepository users, IStokvelRepository stokvels)
         return CreatedAtAction(nameof(GetById), new { id = user.Id }, user.ToResponse());
     }
 
-    /// <summary>Updates a user's name and email. Requires the If-Match header (ETag from GET).</summary>
+    /// <summary>Updates a user's name and email (your own account, or platform admin). Requires If-Match.</summary>
     [HttpPut("{id:guid}")]
+    [RequireUserSelf]   // NEW 6.1
     [ProducesResponseType(typeof(UserResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
@@ -73,8 +81,9 @@ public class UsersController(IUserRepository users, IStokvelRepository stokvels)
         return Ok(user.ToResponse());
     }
 
-    /// <summary>Deletes a user. Fails if the user still belongs to any stokvel.</summary>
+    /// <summary>Deletes a user (your own account, or platform admin). Fails if the user still belongs to any stokvel.</summary>
     [HttpDelete("{id:guid}")]
+    [RequireUserSelf]   // NEW 6.1
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]

@@ -1,5 +1,7 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using RondiTrack.Api.Common.Paging;
+using RondiTrack.Auth;
 using RondiTrack.Common;
 using RondiTrack.Data;
 using RondiTrack.Domain;
@@ -9,14 +11,18 @@ using RondiTrack.Services;
 namespace RondiTrack.Controllers;
 
 [Route("api/stokvels")]
+[ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status401Unauthorized)]   // NEW 6.1: documented on every action
+[ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]      // NEW 6.1
 public class StokvelsController(
     IStokvelRepository stokvels,
     IStokvelMembershipService membershipService,
     IContributionService contributionService,
-    MemberPagingService memberPaging) : RondiControllerBase   // CHANGED 5.3: new paging service
+    MemberPagingService memberPaging,
+    IStokvelAccess access) : RondiControllerBase   // NEW 6.1: access = the 404/403 decision for the contribution check
 {
-    /// <summary>Lists all stokvels.</summary>
+    /// <summary>Lists all stokvels. Platform admins only.</summary>
     [HttpGet]
+    [Authorize(Roles = AuthConstants.PlatformAdminRole)]   // NEW 6.1: the ONE plain role check in the whole API
     [ProducesResponseType(typeof(IReadOnlyList<StokvelResponse>), StatusCodes.Status200OK)]
     public async Task<ActionResult<IReadOnlyList<StokvelResponse>>> GetAll()
     {
@@ -25,17 +31,18 @@ public class StokvelsController(
     }
 
     /// <summary>Gets a single stokvel by id. The ETag header is the concurrency token.</summary>
-    [HttpGet("{id:guid}")]
+    [HttpGet("{stokvelId:guid}")]
+    [RequireStokvelMember]   // NEW 6.1
     [ProducesResponseType(typeof(StokvelResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
-    public async Task<ActionResult<StokvelResponse>> GetById(Guid id)
+    public async Task<ActionResult<StokvelResponse>> GetById(Guid stokvelId)
     {
-        var stokvel = await stokvels.GetByIdAsync(id) ?? throw new DomainNotFoundException($"Stokvel {id} was not found.");
+        var stokvel = await stokvels.GetByIdAsync(stokvelId) ?? throw new DomainNotFoundException($"Stokvel {stokvelId} was not found.");
         ETagHelper.Set(Response, stokvel.Version);   // ADDED 5.3: token leaves the server
         return Ok(stokvel.ToResponse());
     }
 
-    /// <summary>Creates a new stokvel.</summary>
+    /// <summary>Creates a new stokvel. Any signed-in user (see README gap about the creator).</summary>
     [HttpPost]
     [ProducesResponseType(typeof(StokvelResponse), StatusCodes.Status201Created)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
@@ -45,11 +52,12 @@ public class StokvelsController(
         await stokvels.AddAsync(stokvel);
 
         ETagHelper.Set(Response, stokvel.Version);   // ADDED 5.3
-        return CreatedAtAction(nameof(GetById), new { id = stokvel.Id }, stokvel.ToResponse());
+        return CreatedAtAction(nameof(GetById), new { stokvelId = stokvel.Id }, stokvel.ToResponse());
     }
 
-    /// <summary>Updates a stokvel's details. Requires the If-Match header (ETag from GET).</summary>
-    [HttpPut("{id:guid}")]
+    /// <summary>Updates a stokvel's details. Treasurer or Admin only. Requires the If-Match header.</summary>
+    [HttpPut("{stokvelId:guid}")]
+    [RequireStokvelOfficer]   // NEW 6.1
     [ProducesResponseType(typeof(StokvelResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
@@ -57,11 +65,11 @@ public class StokvelsController(
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status412PreconditionFailed)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status428PreconditionRequired)]
     public async Task<ActionResult<StokvelResponse>> Update(
-        Guid id, StokvelRequest request, [FromHeader(Name = "If-Match")] string? ifMatch)
+        Guid stokvelId, StokvelRequest request, [FromHeader(Name = "If-Match")] string? ifMatch)
     {
         var expectedVersion = ETagHelper.ParseIfMatch(ifMatch);   // ADDED 5.3: the token is required
 
-        var stokvel = await stokvels.GetByIdAsync(id) ?? throw new DomainNotFoundException($"Stokvel {id} was not found.");
+        var stokvel = await stokvels.GetByIdAsync(stokvelId) ?? throw new DomainNotFoundException($"Stokvel {stokvelId} was not found.");
         stokvel.UpdateDetails(request.Name, request.ContributionAmount, request.Frequency, request.MaxMembers);
         stokvel.SetExpectedVersion(expectedVersion);   // ADDED 5.3: use the version the CLIENT saw
         await stokvels.UpdateAsync(stokvel);
@@ -70,14 +78,15 @@ public class StokvelsController(
         return Ok(stokvel.ToResponse());
     }
 
-    /// <summary>Deletes a stokvel.</summary>
-    [HttpDelete("{id:guid}")]
+    /// <summary>Deletes a stokvel. Treasurer or Admin only.</summary>
+    [HttpDelete("{stokvelId:guid}")]
+    [RequireStokvelOfficer]   // NEW 6.1
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
-    public async Task<IActionResult> Delete(Guid id)
+    public async Task<IActionResult> Delete(Guid stokvelId)
     {
-        if (!await stokvels.DeleteAsync(id))
-            throw new DomainNotFoundException($"Stokvel {id} was not found.");
+        if (!await stokvels.DeleteAsync(stokvelId))
+            throw new DomainNotFoundException($"Stokvel {stokvelId} was not found.");
         return NoContent();
     }
 
@@ -85,69 +94,76 @@ public class StokvelsController(
     /// Lists a stokvel's members in rotation order. CHANGED 5.3: paged in the database.
     /// Query: pageSize, pageToken.
     /// </summary>
-    [HttpGet("{id:guid}/members")]
+    [HttpGet("{stokvelId:guid}/members")]
+    [RequireStokvelMember]   // NEW 6.1
     [ProducesResponseType(typeof(PagedResponse<UserResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
     public async Task<ActionResult<PagedResponse<UserResponse>>> GetMembers(
-        Guid id, [FromQuery] int? pageSize, [FromQuery] string? pageToken, CancellationToken ct)
+        Guid stokvelId, [FromQuery] int? pageSize, [FromQuery] string? pageToken, CancellationToken ct)
     {
-        var result = await memberPaging.ListAsync(id, pageSize, pageToken, ct)
-            ?? throw new DomainNotFoundException($"Stokvel {id} was not found.");
+        var result = await memberPaging.ListAsync(stokvelId, pageSize, pageToken, ct)
+            ?? throw new DomainNotFoundException($"Stokvel {stokvelId} was not found.");
         return Ok(result);
     }
 
     /// <summary>Gets a single member of a stokvel.</summary>
-    [HttpGet("{id:guid}/members/{userId:guid}")]
+    [HttpGet("{stokvelId:guid}/members/{userId:guid}")]
+    [RequireStokvelMember]   // NEW 6.1
     [ProducesResponseType(typeof(UserResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
-    public async Task<ActionResult<UserResponse>> GetMember(Guid id, Guid userId)
+    public async Task<ActionResult<UserResponse>> GetMember(Guid stokvelId, Guid userId)
     {
-        var stokvel = await stokvels.GetByIdAsync(id) ?? throw new DomainNotFoundException($"Stokvel {id} was not found.");
+        var stokvel = await stokvels.GetByIdAsync(stokvelId) ?? throw new DomainNotFoundException($"Stokvel {stokvelId} was not found.");
         var member = stokvel.FindMember(userId) ?? throw new DomainNotFoundException($"User {userId} was not found in this stokvel.");
         return Ok(member.ToResponse());
     }
 
-    /// <summary>Adds an existing user as a member. Fails if the stokvel is full or the user is already a member.</summary>
-    [HttpPost("{id:guid}/members")]
+    /// <summary>Adds an existing user as a member. Treasurer or Admin only.</summary>
+    [HttpPost("{stokvelId:guid}/members")]
+    [RequireStokvelOfficer]   // NEW 6.1
     [ProducesResponseType(typeof(UserResponse), StatusCodes.Status201Created)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status422UnprocessableEntity)]
-    public async Task<ActionResult<UserResponse>> AddMember(Guid id, AddMemberRequest request)
+    public async Task<ActionResult<UserResponse>> AddMember(Guid stokvelId, AddMemberRequest request)
     {
-        var user = await membershipService.AddMemberAsync(id, request.UserId);
-        return CreatedAtAction(nameof(GetMember), new { id, userId = user.Id }, user.ToResponse());
+        var user = await membershipService.AddMemberAsync(stokvelId, request.UserId);
+        return CreatedAtAction(nameof(GetMember), new { stokvelId, userId = user.Id }, user.ToResponse());
     }
 
-    /// <summary>Removes a member from a stokvel.</summary>
-    [HttpDelete("{id:guid}/members/{userId:guid}")]
+    /// <summary>Removes a member from a stokvel. Treasurer or Admin only.</summary>
+    [HttpDelete("{stokvelId:guid}/members/{userId:guid}")]
+    [RequireStokvelOfficer]   // NEW 6.1
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
-    public async Task<IActionResult> RemoveMember(Guid id, Guid userId)
+    public async Task<IActionResult> RemoveMember(Guid stokvelId, Guid userId)
     {
-        await membershipService.RemoveMemberAsync(id, userId);
+        await membershipService.RemoveMemberAsync(stokvelId, userId);
         return NoContent();
     }
 
     /// <summary>
-    /// Records a member's contribution to a stokvel cycle. Requires an Idempotency-Key header;
-    /// a repeated request with the same key and body returns the original result, the same key
-    /// with a different body is rejected, and a member cannot pay for the same cycle twice.
+    /// Records a contribution. A member may record their own; a Treasurer or Admin may record for anyone.
+    /// Requires an Idempotency-Key header.
     /// </summary>
-    [HttpPost("{id:guid}/contributions")]
+    [HttpPost("{stokvelId:guid}/contributions")]
+    [RequireStokvelMember]   // NEW 6.1: must at least be a member (non-members get 404 before anything else)
     [ProducesResponseType(typeof(ContributionResponse), StatusCodes.Status201Created)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status422UnprocessableEntity)]
     public async Task<ActionResult<ContributionResponse>> RecordContribution(
-        Guid id, ContributionRequest request, [FromHeader(Name = "Idempotency-Key")] string? idempotencyKey)
+        Guid stokvelId, ContributionRequest request, [FromHeader(Name = "Idempotency-Key")] string? idempotencyKey)
     {
+        // NEW 6.1: own contribution = ok, someone else's = officer only (403 otherwise)
+        await access.EnsureAsync(User, stokvelId, Policies.RecordContribution, request.UserId);
+
         if (string.IsNullOrWhiteSpace(idempotencyKey))
             throw new DomainValidationException("The Idempotency-Key header is required.");
 
-        var (response, _) = await contributionService.RecordContributionAsync(id, request, idempotencyKey);
+        var (response, _) = await contributionService.RecordContributionAsync(stokvelId, request, idempotencyKey);
         return StatusCode(StatusCodes.Status201Created, response);
     }
 }

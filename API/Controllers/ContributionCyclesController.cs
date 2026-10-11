@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using RondiTrack.Api.Common.Paging;
+using RondiTrack.Auth;
 using RondiTrack.Common;
 using RondiTrack.Data;
 using RondiTrack.Domain;
@@ -9,6 +10,8 @@ using RondiTrack.Services;
 namespace RondiTrack.Controllers;
 
 [Route("api/stokvels/{stokvelId:guid}/cycles")]
+[ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status401Unauthorized)]   // NEW 6.1
+[ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]      // NEW 6.1
 public class ContributionCyclesController(
     IContributionCycleRepository cycles,
     IStokvelRepository stokvels,
@@ -16,6 +19,7 @@ public class ContributionCyclesController(
 {
     /// <summary>Lists a stokvel's contribution cycles.</summary>
     [HttpGet]
+    [RequireStokvelMember]   // NEW 6.1
     [ProducesResponseType(typeof(IReadOnlyList<ContributionCycleResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
     public async Task<ActionResult<IReadOnlyList<ContributionCycleResponse>>> GetAll(Guid stokvelId)
@@ -29,6 +33,7 @@ public class ContributionCyclesController(
 
     /// <summary>Gets a single contribution cycle. The ETag header is the concurrency token.</summary>
     [HttpGet("{id:guid}")]
+    [RequireStokvelMember]   // NEW 6.1
     [ProducesResponseType(typeof(ContributionCycleResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
     public async Task<ActionResult<ContributionCycleResponse>> GetById(Guid stokvelId, Guid id)
@@ -47,6 +52,7 @@ public class ContributionCyclesController(
     /// Query: pageSize, pageToken, sort (date|-date|amount|-amount), userId, dateFrom, dateTo.
     /// </summary>
     [HttpGet("{cycleId:guid}/contributions")]
+    [RequireStokvelMember]   // NEW 6.1
     [ProducesResponseType(typeof(PagedResponse<ContributionDetailResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
@@ -60,8 +66,9 @@ public class ContributionCyclesController(
         return Ok(await contributionPaging.ListAsync(cycleId, query, ct));
     }
 
-    /// <summary>Creates a new contribution cycle for a stokvel.</summary>
+    /// <summary>Opens a new contribution cycle. Treasurer or Admin only.</summary>
     [HttpPost]
+    [RequireStokvelOfficer]   // NEW 6.1
     [ProducesResponseType(typeof(ContributionCycleResponse), StatusCodes.Status201Created)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
@@ -77,8 +84,9 @@ public class ContributionCyclesController(
         return CreatedAtAction(nameof(GetById), new { stokvelId, id = cycle.Id }, cycle.ToResponse());
     }
 
-    /// <summary>Updates a cycle's number and target amount. Requires the If-Match header (ETag from GET).</summary>
+    /// <summary>Updates a cycle. Treasurer or Admin only. Requires the If-Match header (ETag from GET).</summary>
     [HttpPut("{id:guid}")]
+    [RequireStokvelOfficer]   // NEW 6.1
     [ProducesResponseType(typeof(ContributionCycleResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
@@ -102,8 +110,9 @@ public class ContributionCyclesController(
         return Ok(cycle.ToResponse());
     }
 
-    /// <summary>Deletes a contribution cycle.</summary>
+    /// <summary>Deletes a contribution cycle. Treasurer or Admin only.</summary>
     [HttpDelete("{id:guid}")]
+    [RequireStokvelOfficer]   // NEW 6.1
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
     public async Task<IActionResult> Delete(Guid stokvelId, Guid id)
