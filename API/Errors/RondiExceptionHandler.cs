@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
 using RondiTrack.Api.Common.Paging;
+using RondiTrack.Auth;
 using RondiTrack.Common;
 using RondiTrack.Domain;
 using System.Text.Json;
@@ -64,6 +65,21 @@ public sealed class RondiExceptionHandler(ILogger<RondiExceptionHandler> logger)
             title = "Precondition Required";
             detail = exception.Message;
         }
+        // NEW 6.1: wrong login or bad refresh token -> 401 (the message is the same for every cause)
+        else if (exception is InvalidCredentialsException or InvalidRefreshTokenException)
+        {
+            status = StatusCodes.Status401Unauthorized;
+            title = "Unauthorized";
+            detail = exception.Message;
+            httpContext.Response.Headers.WWWAuthenticate = "Bearer";
+        }
+        // NEW 6.1: signed in but missing the role in this stokvel -> 403
+        else if (exception is ForbiddenException)
+        {
+            status = StatusCodes.Status403Forbidden;
+            title = "Forbidden";
+            detail = exception.Message;
+        }
         // ADDED 5.3: xmin token was stale. If the client sent If-Match, the precondition failed (412).
         // If there was no If-Match (a race inside the server, e.g. two payouts at once), it is a plain 409.
         else if (exception is DbUpdateConcurrencyException)
@@ -89,7 +105,9 @@ public sealed class RondiExceptionHandler(ILogger<RondiExceptionHandler> logger)
             detail = "That record already exists (it would break a uniqueness rule).";
         }
 
-        logger.LogError(exception, "Request failed with status {Status}. CorrelationId: {CorrelationId}", status, correlationId);
+        // CHANGED 6.1: expected 4xx answers are warnings, only real failures (5xx) are errors
+        logger.Log(status >= 500 ? LogLevel.Error : LogLevel.Warning, exception,
+            "Request failed with status {Status}. CorrelationId: {CorrelationId}", status, correlationId);
 
         var problemDetails = new ProblemDetails
         {
