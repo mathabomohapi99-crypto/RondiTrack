@@ -1,18 +1,9 @@
 using System.Collections.Concurrent;
-using RondiTrack.Domain;
+using RondiTrack.Domain;   // IUserRepository now comes from Domain
 
 namespace RondiTrack.Data;
 
-public interface IUserRepository
-{
-    Task<IReadOnlyList<User>> GetAllAsync();
-    Task<User?> GetByIdAsync(Guid id);
-    Task<bool> EmailExistsAsync(string email, Guid? excludingUserId = null);
-    Task AddAsync(User user);
-    Task UpdateAsync(User user);
-    Task<bool> DeleteAsync(Guid id);
-}
-
+// interface removed: it now lives in Domain/Interfaces/IUserRepository.cs
 public sealed class InMemoryUserRepository : IUserRepository
 {
     private readonly ConcurrentDictionary<Guid, User> _users = new();

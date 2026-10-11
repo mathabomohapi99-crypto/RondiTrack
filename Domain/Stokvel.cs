@@ -39,15 +39,16 @@ public sealed class Stokvel
         MaxMembers = ValidateMaxMembers(maxMembers);
     }
 
-    internal Stokvel(Guid id, string name, decimal contributionAmount,
+    // CHANGED 5.4: internal -> public, because SeedData now lives in the Infrastructure project
+    public Stokvel(Guid id, string name, decimal contributionAmount,
         ContributionFrequency frequency, int maxMembers)
         : this(name, contributionAmount, frequency, maxMembers)
     {
         Id = id;
     }
 
-    // Used by EfStokvelRepository to fill the member list after loading from the database
-    internal void LoadMembers(IEnumerable<User> users)
+    // CHANGED 5.4: internal -> public, because EfStokvelRepository now lives in the Infrastructure project
+    public void LoadMembers(IEnumerable<User> users)
     {
         _members.Clear();
         _members.AddRange(users);

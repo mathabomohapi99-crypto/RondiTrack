@@ -1,17 +1,9 @@
 using System.Collections.Concurrent;
-using RondiTrack.Domain;
+using RondiTrack.Domain;   // IContributionCycleRepository now comes from Domain
 
 namespace RondiTrack.Data;
 
-public interface IContributionCycleRepository
-{
-    Task<IReadOnlyList<ContributionCycle>> GetByStokvelAsync(Guid stokvelId);
-    Task<ContributionCycle?> GetByIdAsync(Guid id);
-    Task AddAsync(ContributionCycle cycle);
-    Task UpdateAsync(ContributionCycle cycle);
-    Task<bool> DeleteAsync(Guid id);
-}
-
+// interface removed: it now lives in Domain/Interfaces/IContributionCycleRepository.cs
 public sealed class InMemoryContributionCycleRepository : IContributionCycleRepository
 {
     private readonly ConcurrentDictionary<Guid, ContributionCycle> _cycles = new();

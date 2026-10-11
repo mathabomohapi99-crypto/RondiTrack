@@ -1,0 +1,1 @@
+global using RondiTrack.Domain;   // makes entities and repository interfaces visible in the whole Infrastructure project

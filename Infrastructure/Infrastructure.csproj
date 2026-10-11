@@ -1,0 +1,19 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.EntityFrameworkCore" Version="10.0.12" /> <!-- EF core -->
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="10.0.12" /> <!-- relational EF features -->
+    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" /> <!-- Postgres provider (moved from API) -->
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Domain\Domain.csproj" /> <!-- Infrastructure -> Domain -->
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,2 @@
+global using RondiTrack.Domain;   // makes entities and repository interfaces visible in the whole API project
+global using RondiTrack.Data;     // makes RondiTrackDbContext visible (Infrastructure keeps the RondiTrack.Data namespace)

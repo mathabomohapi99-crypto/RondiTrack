@@ -27,7 +27,8 @@ public sealed class User
         Email = ValidateEmail(email);
     }
 
-    internal User(Guid id, string fullName, string email) : this(fullName, email)
+    // CHANGED 5.4: internal -> public, because SeedData now lives in the Infrastructure project
+    public User(Guid id, string fullName, string email) : this(fullName, email)
     {
         Id = id;
     }

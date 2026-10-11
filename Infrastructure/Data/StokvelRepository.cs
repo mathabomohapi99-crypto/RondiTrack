@@ -1,18 +1,9 @@
 using System.Collections.Concurrent;
-using RondiTrack.Domain;
+using RondiTrack.Domain;   // IStokvelRepository now comes from Domain
 
 namespace RondiTrack.Data;
 
-public interface IStokvelRepository
-{
-    Task<IReadOnlyList<Stokvel>> GetAllAsync();
-    Task<Stokvel?> GetByIdAsync(Guid id);
-    Task<bool> AnyWithMemberAsync(Guid userId);
-    Task AddAsync(Stokvel stokvel);
-    Task UpdateAsync(Stokvel stokvel);
-    Task<bool> DeleteAsync(Guid id);
-}
-
+// interface removed: it now lives in Domain/Interfaces/IStokvelRepository.cs
 public sealed class InMemoryStokvelRepository : IStokvelRepository
 {
     private readonly ConcurrentDictionary<Guid, Stokvel> _stokvels = new();

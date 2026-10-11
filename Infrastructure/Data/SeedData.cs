@@ -3,7 +3,7 @@ using RondiTrack.Domain;
 
 namespace RondiTrack.Data;
 
-internal static class SeedData
+public static class SeedData
 {
     public static IReadOnlyList<User> Users { get; }
     public static IReadOnlyList<Stokvel> Stokvels { get; }

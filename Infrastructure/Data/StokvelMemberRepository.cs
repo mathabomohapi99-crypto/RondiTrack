@@ -1,18 +1,10 @@
 using Microsoft.EntityFrameworkCore;
-using RondiTrack.Domain;
+using RondiTrack.Domain;   // IStokvelMemberRepository now comes from Domain
 
 namespace RondiTrack.Data;
 
 // New file. Dedicated access for StokvelMember (composite key = two ids)
-public interface IStokvelMemberRepository
-{
-    // forUpdate: false = pure read (not tracked), true = I will change it and save
-    Task<StokvelMember?> GetAsync(Guid userId, Guid stokvelId, bool forUpdate = false);
-    Task<IReadOnlyList<StokvelMember>> GetByStokvelAsync(Guid stokvelId);
-    Task AddAsync(StokvelMember member);
-    Task RemoveAsync(StokvelMember member);
-}
-
+// interface removed: it now lives in Domain/Interfaces/IStokvelMemberRepository.cs
 public sealed class EfStokvelMemberRepository(RondiTrackDbContext db) : IStokvelMemberRepository
 {
     public async Task<StokvelMember?> GetAsync(Guid userId, Guid stokvelId, bool forUpdate = false)
