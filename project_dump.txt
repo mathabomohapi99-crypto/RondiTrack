@@ -1,0 +1,4044 @@
+﻿
+===== Common/ApiBadRequestException.cs =====
+namespace RondiTrack.Api.Common.Paging;
+
+// NEW: our own exception for "the client sent something invalid".
+// The central error handler turns it into a 400 problem response.
+public class ApiBadRequestException : Exception
+{
+    public ApiBadRequestException(string message) : base(message) { }
+}
+
+===== Common/ETagHelper.cs =====
+using Microsoft.AspNetCore.Http;
+using RondiTrack.Api.Common.Paging;
+
+namespace RondiTrack.Common;
+
+// NEW: turns the xmin version number into an ETag header and back.
+public static class ETagHelper
+{
+    // Puts the entity's version on the response as: ETag: "12345"
+    public static void Set(HttpResponse response, uint version) =>
+        response.Headers.ETag = $"\"{version}\"";
+
+    // Reads the If-Match header. Missing -> 428, not a number -> 400.
+    public static uint ParseIfMatch(string? header)
+    {
+        if (string.IsNullOrWhiteSpace(header))
+            throw new PreconditionRequiredException(
+                "The If-Match header is required. Send the ETag you received from GET.");
+
+        var text = header.Trim();
+        if (text.StartsWith("W/")) text = text[2..];
+        text = text.Trim('"');
+
+        if (!uint.TryParse(text, out var version))
+            throw new ApiBadRequestException("The If-Match header is not a valid ETag.");
+
+        return version;
+    }
+}
+
+===== Common/PageTokenCodec.cs =====
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+
+namespace RondiTrack.Api.Common.Paging;
+
+// CHANGED: LastId is now a Guid (your ids are Guids, not ints).
+// Context = fingerprint of the sort + filters, so we can detect a token reused with different ones.
+public record PageCursor(string Context, string LastValue, Guid LastId);
+
+public static class PageTokenCodec
+{
+    // Turns the cursor into an opaque base64url string the client cannot read.
+    public static string Encode(PageCursor cursor)
+    {
+        var json = JsonSerializer.SerializeToUtf8Bytes(cursor);
+        return Convert.ToBase64String(json).Replace('+', '-').Replace('/', '_').TrimEnd('=');
+    }
+
+    // Reads a token back. A broken token, or a token from a different sort/filter, gives a 400.
+    public static PageCursor Decode(string token, string expectedContext)
+    {
+        PageCursor? cursor;
+        try
+        {
+            var b64 = token.Replace('-', '+').Replace('_', '/');
+            b64 = b64.PadRight(b64.Length + (4 - b64.Length % 4) % 4, '=');
+            cursor = JsonSerializer.Deserialize<PageCursor>(Convert.FromBase64String(b64));
+        }
+        catch
+        {
+            throw new ApiBadRequestException("pageToken is invalid.");
+        }
+
+        if (cursor is null)
+            throw new ApiBadRequestException("pageToken is invalid.");
+
+        if (cursor.Context != expectedContext)
+            throw new ApiBadRequestException(
+                "pageToken was issued for a different sort or filter. Start again without a pageToken.");
+
+        return cursor;
+    }
+
+    // Short fingerprint of sort + filters (same inputs always give the same text).
+    public static string ContextOf(params object?[] parts)
+    {
+        var text = string.Join("|", parts.Select(p => p?.ToString() ?? ""));
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text)))[..12];
+    }
+}
+
+===== Common/PagedResponse.cs =====
+namespace RondiTrack.Api.Common.Paging;
+
+// NEW: the shape every paged endpoint returns.
+// NextPageToken is "" when there are no more results (end-of-results signal).
+// There is no total count on purpose (see README).
+public record PagedResponse<T>(IReadOnlyList<T> Items, string NextPageToken);
+
+===== Common/PagingDefaults.cs =====
+namespace RondiTrack.Api.Common.Paging;
+
+public static class PagingDefaults
+{
+    public const int DefaultPageSize = 25;
+    public const int MaxPageSize = 100;
+
+    // NEW: page size rules.
+    // null or 0  -> use the default
+    // negative   -> 400
+    // too big    -> quietly reduced to the maximum (not rejected)
+    public static int Resolve(int? requested)
+    {
+        if (requested is null || requested == 0) return DefaultPageSize;
+        if (requested < 0) throw new ApiBadRequestException("pageSize cannot be negative.");
+        return Math.Min(requested.Value, MaxPageSize);
+    }
+}
+
+===== Common/PreconditionRequiredException.cs =====
+namespace RondiTrack.Common;
+
+// NEW: thrown when an update arrives without the If-Match header. Becomes a 428 problem response.
+public sealed class PreconditionRequiredException(string message) : Exception(message);
+
+===== Controllers/ContributionCyclesController.cs =====
+using Microsoft.AspNetCore.Mvc;
+using RondiTrack.Api.Common.Paging;
+using RondiTrack.Common;
+using RondiTrack.Data;
+using RondiTrack.Domain;
+using RondiTrack.Dtos;
+using RondiTrack.Services;
+
+namespace RondiTrack.Controllers;
+
+[Route("api/stokvels/{stokvelId:guid}/cycles")]
+public class ContributionCyclesController(
+    IContributionCycleRepository cycles,
+    IStokvelRepository stokvels,
+    ContributionPagingService contributionPaging) : RondiControllerBase   // CHANGED 5.3: paging service replaces the strategy switch
+{
+    /// <summary>Lists a stokvel's contribution cycles.</summary>
+    [HttpGet]
+    [ProducesResponseType(typeof(IReadOnlyList<ContributionCycleResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<IReadOnlyList<ContributionCycleResponse>>> GetAll(Guid stokvelId)
+    {
+        if (await stokvels.GetByIdAsync(stokvelId) is null)
+            throw new DomainNotFoundException($"Stokvel {stokvelId} was not found.");
+
+        var all = await cycles.GetByStokvelAsync(stokvelId);
+        return Ok(all.Select(c => c.ToResponse()));
+    }
+
+    /// <summary>Gets a single contribution cycle. The ETag header is the concurrency token.</summary>
+    [HttpGet("{id:guid}")]
+    [ProducesResponseType(typeof(ContributionCycleResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<ContributionCycleResponse>> GetById(Guid stokvelId, Guid id)
+    {
+        var cycle = await cycles.GetByIdAsync(id);
+        if (cycle is null || cycle.StokvelId != stokvelId)
+            throw new DomainNotFoundException($"Cycle {id} was not found.");
+
+        ETagHelper.Set(Response, cycle.Version);   // ADDED 5.3: token leaves the server
+        return Ok(cycle.ToResponse());
+    }
+
+    /// <summary>
+    /// Lists the contributions recorded for a cycle, with each member's details.
+    /// CHANGED 5.3: paged, sortable and filterable. All of it runs in the database.
+    /// Query: pageSize, pageToken, sort (date|-date|amount|-amount), userId, dateFrom, dateTo.
+    /// </summary>
+    [HttpGet("{cycleId:guid}/contributions")]
+    [ProducesResponseType(typeof(PagedResponse<ContributionDetailResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<PagedResponse<ContributionDetailResponse>>> GetContributions(
+        Guid stokvelId, Guid cycleId, [FromQuery] ContributionListQuery query, CancellationToken ct)
+    {
+        var cycle = await cycles.GetByIdAsync(cycleId);
+        if (cycle is null || cycle.StokvelId != stokvelId)
+            throw new DomainNotFoundException($"Cycle {cycleId} was not found.");
+
+        return Ok(await contributionPaging.ListAsync(cycleId, query, ct));
+    }
+
+    /// <summary>Creates a new contribution cycle for a stokvel.</summary>
+    [HttpPost]
+    [ProducesResponseType(typeof(ContributionCycleResponse), StatusCodes.Status201Created)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<ContributionCycleResponse>> Create(Guid stokvelId, ContributionCycleRequest request)
+    {
+        if (await stokvels.GetByIdAsync(stokvelId) is null)
+            throw new DomainNotFoundException($"Stokvel {stokvelId} was not found.");
+
+        var cycle = new ContributionCycle(stokvelId, request.CycleNumber, request.TargetAmount);
+        await cycles.AddAsync(cycle);
+
+        ETagHelper.Set(Response, cycle.Version);   // ADDED 5.3
+        return CreatedAtAction(nameof(GetById), new { stokvelId, id = cycle.Id }, cycle.ToResponse());
+    }
+
+    /// <summary>Updates a cycle's number and target amount. Requires the If-Match header (ETag from GET).</summary>
+    [HttpPut("{id:guid}")]
+    [ProducesResponseType(typeof(ContributionCycleResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status412PreconditionFailed)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status428PreconditionRequired)]
+    public async Task<ActionResult<ContributionCycleResponse>> Update(
+        Guid stokvelId, Guid id, ContributionCycleRequest request,
+        [FromHeader(Name = "If-Match")] string? ifMatch)
+    {
+        var expectedVersion = ETagHelper.ParseIfMatch(ifMatch);   // ADDED 5.3: the token is required
+
+        var cycle = await cycles.GetByIdAsync(id);
+        if (cycle is null || cycle.StokvelId != stokvelId)
+            throw new DomainNotFoundException($"Cycle {id} was not found.");
+
+        cycle.UpdateDetails(request.CycleNumber, request.TargetAmount);
+        cycle.SetExpectedVersion(expectedVersion);   // ADDED 5.3: use the version the CLIENT saw, not the one just loaded
+        await cycles.UpdateAsync(cycle);
+
+        ETagHelper.Set(Response, cycle.Version);     // ADDED 5.3: hand back the new token
+        return Ok(cycle.ToResponse());
+    }
+
+    /// <summary>Deletes a contribution cycle.</summary>
+    [HttpDelete("{id:guid}")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> Delete(Guid stokvelId, Guid id)
+    {
+        var cycle = await cycles.GetByIdAsync(id);
+        if (cycle is null || cycle.StokvelId != stokvelId)
+            throw new DomainNotFoundException($"Cycle {id} was not found.");
+
+        await cycles.DeleteAsync(id);
+        return NoContent();
+    }
+}
+
+===== Controllers/PayoutController.cs =====
+using Microsoft.AspNetCore.Mvc;
+using RondiTrack.Dtos;
+using RondiTrack.Services;
+
+namespace RondiTrack.Controllers;
+
+[ApiController]
+[Route("api/stokvels/{stokvelId:guid}/cycles/{cycleId:guid}/payouts")]
+public sealed class PayoutsController(IPayoutService payouts) : ControllerBase
+{
+    [HttpPost]
+    public async Task<ActionResult<PayoutResponse>> ProcessNextPayout(
+        Guid stokvelId, Guid cycleId, CancellationToken ct)
+    {
+        var result = await payouts.ProcessNextPayoutAsync(stokvelId, cycleId, ct);
+        return StatusCode(StatusCodes.Status201Created, result);
+    }
+}
+
+===== Controllers/RondiControllerBase.cs =====
+using Microsoft.AspNetCore.Mvc;
+
+namespace RondiTrack.Controllers;
+// currently just the base setup that makes them behave as API controllers
+[ApiController]
+public abstract class RondiControllerBase : ControllerBase;
+
+===== Controllers/StokvelsController.cs =====
+using Microsoft.AspNetCore.Mvc;
+using RondiTrack.Api.Common.Paging;
+using RondiTrack.Common;
+using RondiTrack.Data;
+using RondiTrack.Domain;
+using RondiTrack.Dtos;
+using RondiTrack.Services;
+
+namespace RondiTrack.Controllers;
+
+[Route("api/stokvels")]
+public class StokvelsController(
+    IStokvelRepository stokvels,
+    IStokvelMembershipService membershipService,
+    IContributionService contributionService,
+    MemberPagingService memberPaging) : RondiControllerBase   // CHANGED 5.3: new paging service
+{
+    /// <summary>Lists all stokvels.</summary>
+    [HttpGet]
+    [ProducesResponseType(typeof(IReadOnlyList<StokvelResponse>), StatusCodes.Status200OK)]
+    public async Task<ActionResult<IReadOnlyList<StokvelResponse>>> GetAll()
+    {
+        var all = await stokvels.GetAllAsync();
+        return Ok(all.Select(s => s.ToResponse()));
+    }
+
+    /// <summary>Gets a single stokvel by id. The ETag header is the concurrency token.</summary>
+    [HttpGet("{id:guid}")]
+    [ProducesResponseType(typeof(StokvelResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<StokvelResponse>> GetById(Guid id)
+    {
+        var stokvel = await stokvels.GetByIdAsync(id) ?? throw new DomainNotFoundException($"Stokvel {id} was not found.");
+        ETagHelper.Set(Response, stokvel.Version);   // ADDED 5.3: token leaves the server
+        return Ok(stokvel.ToResponse());
+    }
+
+    /// <summary>Creates a new stokvel.</summary>
+    [HttpPost]
+    [ProducesResponseType(typeof(StokvelResponse), StatusCodes.Status201Created)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    public async Task<ActionResult<StokvelResponse>> Create(StokvelRequest request)
+    {
+        var stokvel = new Stokvel(request.Name, request.ContributionAmount, request.Frequency, request.MaxMembers);
+        await stokvels.AddAsync(stokvel);
+
+        ETagHelper.Set(Response, stokvel.Version);   // ADDED 5.3
+        return CreatedAtAction(nameof(GetById), new { id = stokvel.Id }, stokvel.ToResponse());
+    }
+
+    /// <summary>Updates a stokvel's details. Requires the If-Match header (ETag from GET).</summary>
+    [HttpPut("{id:guid}")]
+    [ProducesResponseType(typeof(StokvelResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status412PreconditionFailed)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status428PreconditionRequired)]
+    public async Task<ActionResult<StokvelResponse>> Update(
+        Guid id, StokvelRequest request, [FromHeader(Name = "If-Match")] string? ifMatch)
+    {
+        var expectedVersion = ETagHelper.ParseIfMatch(ifMatch);   // ADDED 5.3: the token is required
+
+        var stokvel = await stokvels.GetByIdAsync(id) ?? throw new DomainNotFoundException($"Stokvel {id} was not found.");
+        stokvel.UpdateDetails(request.Name, request.ContributionAmount, request.Frequency, request.MaxMembers);
+        stokvel.SetExpectedVersion(expectedVersion);   // ADDED 5.3: use the version the CLIENT saw
+        await stokvels.UpdateAsync(stokvel);
+
+        ETagHelper.Set(Response, stokvel.Version);     // ADDED 5.3: hand back the new token
+        return Ok(stokvel.ToResponse());
+    }
+
+    /// <summary>Deletes a stokvel.</summary>
+    [HttpDelete("{id:guid}")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> Delete(Guid id)
+    {
+        if (!await stokvels.DeleteAsync(id))
+            throw new DomainNotFoundException($"Stokvel {id} was not found.");
+        return NoContent();
+    }
+
+    /// <summary>
+    /// Lists a stokvel's members in rotation order. CHANGED 5.3: paged in the database.
+    /// Query: pageSize, pageToken.
+    /// </summary>
+    [HttpGet("{id:guid}/members")]
+    [ProducesResponseType(typeof(PagedResponse<UserResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<PagedResponse<UserResponse>>> GetMembers(
+        Guid id, [FromQuery] int? pageSize, [FromQuery] string? pageToken, CancellationToken ct)
+    {
+        var result = await memberPaging.ListAsync(id, pageSize, pageToken, ct)
+            ?? throw new DomainNotFoundException($"Stokvel {id} was not found.");
+        return Ok(result);
+    }
+
+    /// <summary>Gets a single member of a stokvel.</summary>
+    [HttpGet("{id:guid}/members/{userId:guid}")]
+    [ProducesResponseType(typeof(UserResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<UserResponse>> GetMember(Guid id, Guid userId)
+    {
+        var stokvel = await stokvels.GetByIdAsync(id) ?? throw new DomainNotFoundException($"Stokvel {id} was not found.");
+        var member = stokvel.FindMember(userId) ?? throw new DomainNotFoundException($"User {userId} was not found in this stokvel.");
+        return Ok(member.ToResponse());
+    }
+
+    /// <summary>Adds an existing user as a member. Fails if the stokvel is full or the user is already a member.</summary>
+    [HttpPost("{id:guid}/members")]
+    [ProducesResponseType(typeof(UserResponse), StatusCodes.Status201Created)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status422UnprocessableEntity)]
+    public async Task<ActionResult<UserResponse>> AddMember(Guid id, AddMemberRequest request)
+    {
+        var user = await membershipService.AddMemberAsync(id, request.UserId);
+        return CreatedAtAction(nameof(GetMember), new { id, userId = user.Id }, user.ToResponse());
+    }
+
+    /// <summary>Removes a member from a stokvel.</summary>
+    [HttpDelete("{id:guid}/members/{userId:guid}")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> RemoveMember(Guid id, Guid userId)
+    {
+        await membershipService.RemoveMemberAsync(id, userId);
+        return NoContent();
+    }
+
+    /// <summary>
+    /// Records a member's contribution to a stokvel cycle. Requires an Idempotency-Key header;
+    /// a repeated request with the same key and body returns the original result, the same key
+    /// with a different body is rejected, and a member cannot pay for the same cycle twice.
+    /// </summary>
+    [HttpPost("{id:guid}/contributions")]
+    [ProducesResponseType(typeof(ContributionResponse), StatusCodes.Status201Created)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status422UnprocessableEntity)]
+    public async Task<ActionResult<ContributionResponse>> RecordContribution(
+        Guid id, ContributionRequest request, [FromHeader(Name = "Idempotency-Key")] string? idempotencyKey)
+    {
+        if (string.IsNullOrWhiteSpace(idempotencyKey))
+            throw new DomainValidationException("The Idempotency-Key header is required.");
+
+        var (response, _) = await contributionService.RecordContributionAsync(id, request, idempotencyKey);
+        return StatusCode(StatusCodes.Status201Created, response);
+    }
+}
+
+===== Controllers/UsersController.cs =====
+using Microsoft.AspNetCore.Mvc;
+using RondiTrack.Common;
+using RondiTrack.Data;
+using RondiTrack.Domain;
+using RondiTrack.Dtos;
+
+namespace RondiTrack.Controllers;
+
+[Route("api/users")]
+public class UsersController(IUserRepository users, IStokvelRepository stokvels) : RondiControllerBase
+{
+    /// <summary>Lists all users.</summary>
+    [HttpGet]
+    [ProducesResponseType(typeof(IReadOnlyList<UserResponse>), StatusCodes.Status200OK)]
+    public async Task<ActionResult<IReadOnlyList<UserResponse>>> GetAll()
+    {
+        var all = await users.GetAllAsync();
+        return Ok(all.Select(u => u.ToResponse()));
+    }
+
+    /// <summary>Gets a single user by id. The ETag header is the concurrency token.</summary>
+    [HttpGet("{id:guid}")]
+    [ProducesResponseType(typeof(UserResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<UserResponse>> GetById(Guid id)
+    {
+        var user = await users.GetByIdAsync(id) ?? throw new DomainNotFoundException($"User {id} was not found.");
+        ETagHelper.Set(Response, user.Version);   // ADDED 5.3: token leaves the server
+        return Ok(user.ToResponse());
+    }
+
+    /// <summary>Creates a new user. Email must be unique.</summary>
+    [HttpPost]
+    [ProducesResponseType(typeof(UserResponse), StatusCodes.Status201Created)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
+    public async Task<ActionResult<UserResponse>> Create(UserRequest request)
+    {
+        var user = new User(request.FullName, request.Email);
+
+        if (await users.EmailExistsAsync(user.Email))
+            throw new DomainConflictException($"A user with email '{user.Email}' already exists.");
+
+        await users.AddAsync(user);
+
+        ETagHelper.Set(Response, user.Version);   // ADDED 5.3
+        return CreatedAtAction(nameof(GetById), new { id = user.Id }, user.ToResponse());
+    }
+
+    /// <summary>Updates a user's name and email. Requires the If-Match header (ETag from GET).</summary>
+    [HttpPut("{id:guid}")]
+    [ProducesResponseType(typeof(UserResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status412PreconditionFailed)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status428PreconditionRequired)]
+    public async Task<ActionResult<UserResponse>> Update(
+        Guid id, UserRequest request, [FromHeader(Name = "If-Match")] string? ifMatch)
+    {
+        var expectedVersion = ETagHelper.ParseIfMatch(ifMatch);   // ADDED 5.3: the token is required
+
+        var user = await users.GetByIdAsync(id) ?? throw new DomainNotFoundException($"User {id} was not found.");
+
+        if (await users.EmailExistsAsync(request.Email, excludingUserId: id))
+            throw new DomainConflictException($"A user with email '{request.Email.Trim()}' already exists.");
+
+        user.UpdateDetails(request.FullName, request.Email);
+        user.SetExpectedVersion(expectedVersion);   // ADDED 5.3: use the version the CLIENT saw
+        await users.UpdateAsync(user);
+
+        ETagHelper.Set(Response, user.Version);     // ADDED 5.3: hand back the new token
+        return Ok(user.ToResponse());
+    }
+
+    /// <summary>Deletes a user. Fails if the user still belongs to any stokvel.</summary>
+    [HttpDelete("{id:guid}")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
+    public async Task<IActionResult> Delete(Guid id)
+    {
+        if (await users.GetByIdAsync(id) is null)
+            throw new DomainNotFoundException($"User {id} was not found.");
+
+        if (await stokvels.AnyWithMemberAsync(id))
+            throw new DomainConflictException("This user belongs to at least one stokvel. Remove them from all stokvels first.");
+
+        await users.DeleteAsync(id);
+        return NoContent();
+    }
+}
+
+===== Data/ContributionCycleRepository.cs =====
+using System.Collections.Concurrent;
+using RondiTrack.Domain;
+
+namespace RondiTrack.Data;
+
+public interface IContributionCycleRepository
+{
+    Task<IReadOnlyList<ContributionCycle>> GetByStokvelAsync(Guid stokvelId);
+    Task<ContributionCycle?> GetByIdAsync(Guid id);
+    Task AddAsync(ContributionCycle cycle);
+    Task UpdateAsync(ContributionCycle cycle);
+    Task<bool> DeleteAsync(Guid id);
+}
+
+public sealed class InMemoryContributionCycleRepository : IContributionCycleRepository
+{
+    private readonly ConcurrentDictionary<Guid, ContributionCycle> _cycles = new();
+
+    public Task<IReadOnlyList<ContributionCycle>> GetByStokvelAsync(Guid stokvelId) =>
+        Task.FromResult<IReadOnlyList<ContributionCycle>>(
+            _cycles.Values.Where(c => c.StokvelId == stokvelId).OrderBy(c => c.CycleNumber).ToList());
+
+    public Task<ContributionCycle?> GetByIdAsync(Guid id)
+    {
+        _cycles.TryGetValue(id, out var cycle);
+        return Task.FromResult<ContributionCycle?>(cycle);
+    }
+
+    public Task AddAsync(ContributionCycle cycle)
+    {
+        _cycles[cycle.Id] = cycle;
+        return Task.CompletedTask;
+    }
+
+    public Task UpdateAsync(ContributionCycle cycle)
+    {
+        _cycles[cycle.Id] = cycle;
+        return Task.CompletedTask;
+    }
+
+    public Task<bool> DeleteAsync(Guid id) => Task.FromResult(_cycles.TryRemove(id, out _));
+}
+
+===== Data/ContributionQueries.cs =====
+using Microsoft.EntityFrameworkCore;
+using RondiTrack.Domain;
+using RondiTrack.Dtos;
+
+namespace RondiTrack.Data;
+
+// The naive N+1 version and the two fixes, side by side
+public interface IContributionQueries
+{
+    Task<IReadOnlyList<ContributionDetailResponse>> GetForCycleNaiveAsync(Guid stokvelId, Guid cycleId);
+    Task<IReadOnlyList<ContributionDetailResponse>> GetForCycleIncludeAsync(Guid stokvelId, Guid cycleId);
+    Task<IReadOnlyList<ContributionDetailResponse>> GetForCycleProjectedAsync(Guid stokvelId, Guid cycleId);
+}
+
+public sealed class ContributionQueries(RondiTrackDbContext db) : IContributionQueries
+{
+    // VERSION 1: deliberately NAIVE. 1 query for the rows, then 2 more queries PER ROW.
+    public async Task<IReadOnlyList<ContributionDetailResponse>> GetForCycleNaiveAsync(Guid stokvelId, Guid cycleId)
+    {
+        var rows = await db.Contributions
+            .Where(c => c.StokvelId == stokvelId && c.CycleId == cycleId)
+            .OrderBy(c => c.RecordedAtUtc)
+            .ToListAsync();
+
+        var result = new List<ContributionDetailResponse>();
+        foreach (var c in rows)
+        {
+            await db.Entry(c).Reference(x => x.Member).LoadAsync();        // one round trip per row
+            await db.Entry(c.Member).Reference(m => m.User).LoadAsync();   // another round trip per row
+            result.Add(ToDto(c));
+        }
+        return result;
+    }
+
+    // VERSION 2: FIX with eager loading. One query with joins, pulls the whole graph.
+    public async Task<IReadOnlyList<ContributionDetailResponse>> GetForCycleIncludeAsync(Guid stokvelId, Guid cycleId)
+    {
+        var rows = await db.Contributions
+            .AsNoTracking()
+            .Where(c => c.StokvelId == stokvelId && c.CycleId == cycleId)
+            .Include(c => c.Member).ThenInclude(m => m.User)
+            .OrderBy(c => c.RecordedAtUtc)
+            .ToListAsync();
+
+        return rows.Select(ToDto).ToList();
+    }
+
+    // VERSION 3: FIX with projection. One query, only the columns the response needs. THIS ONE SHIPS.
+    public async Task<IReadOnlyList<ContributionDetailResponse>> GetForCycleProjectedAsync(Guid stokvelId, Guid cycleId) =>
+        await db.Contributions
+            .AsNoTracking()
+            .Where(c => c.StokvelId == stokvelId && c.CycleId == cycleId)
+            .OrderBy(c => c.RecordedAtUtc)
+            .Select(c => new ContributionDetailResponse(
+                c.Id, c.UserId, c.Member.User.FullName, c.Member.User.Email,
+                c.Member.Role, c.Member.RotationPosition, c.Amount, c.RecordedAtUtc))
+            .ToListAsync();
+
+    private static ContributionDetailResponse ToDto(Contribution c) =>
+        new(c.Id, c.UserId, c.Member.User.FullName, c.Member.User.Email,
+            c.Member.Role, c.Member.RotationPosition, c.Amount, c.RecordedAtUtc);
+}
+
+===== Data/ContributionRepository.cs =====
+using System.Collections.Concurrent;
+using RondiTrack.Domain;
+
+namespace RondiTrack.Data;
+
+public interface IContributionRepository
+{
+    Task<bool> ExistsAsync(Guid stokvelId, Guid userId, Guid cycleId);
+    Task AddAsync(Contribution contribution);
+    Task<IReadOnlyList<Contribution>> GetByStokvelAsync(Guid stokvelId);
+}
+
+public sealed class InMemoryContributionRepository : IContributionRepository
+{
+    private readonly ConcurrentBag<Contribution> _contributions = [];
+
+    public Task<bool> ExistsAsync(Guid stokvelId, Guid userId, Guid cycleId) =>
+        Task.FromResult(_contributions.Any(c =>
+            c.StokvelId == stokvelId && c.UserId == userId && c.CycleId == cycleId));
+
+    public Task AddAsync(Contribution contribution)
+    {
+        _contributions.Add(contribution);
+        return Task.CompletedTask;
+    }
+
+    public Task<IReadOnlyList<Contribution>> GetByStokvelAsync(Guid stokvelId) =>
+        Task.FromResult<IReadOnlyList<Contribution>>(
+            _contributions.Where(c => c.StokvelId == stokvelId).ToList());
+}
+
+===== Data/EfContributionRepository.cs =====
+using Microsoft.EntityFrameworkCore;
+using RondiTrack.Domain;
+
+namespace RondiTrack.Data;
+
+public sealed class EfContributionRepository(RondiTrackDbContext db) : IContributionRepository
+{
+    public Task<bool> ExistsAsync(Guid stokvelId, Guid userId, Guid cycleId) =>
+        db.Contributions.AnyAsync(c =>
+            c.StokvelId == stokvelId && c.UserId == userId && c.CycleId == cycleId);
+
+    public async Task AddAsync(Contribution contribution)
+    {
+        db.Contributions.Add(contribution);
+        await db.SaveChangesAsync();
+    }
+
+    public async Task<IReadOnlyList<Contribution>> GetByStokvelAsync(Guid stokvelId) =>
+        await db.Contributions
+            .AsNoTracking()
+            .Where(c => c.StokvelId == stokvelId)
+            .OrderBy(c => c.RecordedAtUtc)
+            .ToListAsync();
+}
+
+===== Data/EfRepositories.cs =====
+using Microsoft.EntityFrameworkCore;
+using RondiTrack.Domain;
+
+namespace RondiTrack.Data;
+
+// New file. Users, Stokvels and cycles move from in-memory to Postgres,
+// because the new foreign keys need real rows on both sides.
+
+public sealed class EfUserRepository(RondiTrackDbContext db) : IUserRepository
+{
+    public async Task<IReadOnlyList<User>> GetAllAsync() =>
+        await db.Users.AsNoTracking().OrderBy(u => u.FullName).ToListAsync();
+
+    public async Task<User?> GetByIdAsync(Guid id) =>
+        await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == id);
+
+    public Task<bool> EmailExistsAsync(string email, Guid? excludingUserId = null)
+    {
+        var normalized = email.Trim().ToLowerInvariant();
+        var query = db.Users.Where(u => u.Email == normalized);
+        if (excludingUserId is Guid excluded)
+            query = query.Where(u => u.Id != excluded);
+        return query.AnyAsync();
+    }
+
+    public async Task AddAsync(User user)
+    {
+        db.Users.Add(user);
+        await db.SaveChangesAsync();
+    }
+
+    // Reads are untracked, so a write attaches the changed object explicitly with Update()
+    public async Task UpdateAsync(User user)
+    {
+        db.Users.Update(user);
+        await db.SaveChangesAsync();
+    }
+
+    public async Task<bool> DeleteAsync(Guid id) =>
+        await db.Users.Where(u => u.Id == id).ExecuteDeleteAsync() > 0;
+}
+
+public sealed class EfContributionCycleRepository(RondiTrackDbContext db) : IContributionCycleRepository
+{
+    public async Task<IReadOnlyList<ContributionCycle>> GetByStokvelAsync(Guid stokvelId) =>
+        await db.ContributionCycles.AsNoTracking()
+            .Where(c => c.StokvelId == stokvelId)
+            .OrderBy(c => c.CycleNumber)
+            .ToListAsync();
+
+    public async Task<ContributionCycle?> GetByIdAsync(Guid id) =>
+        await db.ContributionCycles.AsNoTracking().FirstOrDefaultAsync(c => c.Id == id);
+
+    public async Task AddAsync(ContributionCycle cycle)
+    {
+        db.ContributionCycles.Add(cycle);
+        await db.SaveChangesAsync();
+    }
+
+    public async Task UpdateAsync(ContributionCycle cycle)
+    {
+        db.ContributionCycles.Update(cycle);
+        await db.SaveChangesAsync();
+    }
+
+    public async Task<bool> DeleteAsync(Guid id) =>
+        await db.ContributionCycles.Where(c => c.Id == id).ExecuteDeleteAsync() > 0;
+}
+
+public sealed class EfStokvelRepository(RondiTrackDbContext db) : IStokvelRepository
+{
+    // Eager loading: 2 queries in total, however many stokvels there are
+    public async Task<IReadOnlyList<Stokvel>> GetAllAsync()
+    {
+        var stokvels = await db.Stokvels.AsNoTracking().OrderBy(s => s.Name).ToListAsync();
+        var memberships = await db.StokvelMembers.AsNoTracking()
+            .Include(m => m.User)
+            .OrderBy(m => m.RotationPosition)
+            .ToListAsync();
+
+        foreach (var s in stokvels)
+            s.LoadMembers(memberships.Where(m => m.StokvelId == s.Id).Select(m => m.User));
+
+        return stokvels;
+    }
+
+    // Explicit loading: the stokvel first, then its members in a second, deliberate query
+    public async Task<Stokvel?> GetByIdAsync(Guid id)
+    {
+        var stokvel = await db.Stokvels.AsNoTracking().FirstOrDefaultAsync(s => s.Id == id);
+        if (stokvel is null) return null;
+
+        var users = await db.StokvelMembers.AsNoTracking()
+            .Where(m => m.StokvelId == id)
+            .OrderBy(m => m.RotationPosition)
+            .Select(m => m.User)
+            .ToListAsync();
+
+        stokvel.LoadMembers(users);
+        return stokvel;
+    }
+
+    public Task<bool> AnyWithMemberAsync(Guid userId) =>
+        db.StokvelMembers.AnyAsync(m => m.UserId == userId);
+
+    public async Task AddAsync(Stokvel stokvel)
+    {
+        db.Stokvels.Add(stokvel);
+        await db.SaveChangesAsync();
+    }
+
+    // Saves the stokvel's own columns AND turns the in-memory member list into StokvelMember rows
+    public async Task UpdateAsync(Stokvel stokvel)
+    {
+        db.Stokvels.Update(stokvel);
+
+        var existing = await db.StokvelMembers.Where(m => m.StokvelId == stokvel.Id).ToListAsync();
+        var wantedIds = stokvel.Members.Select(u => u.Id).ToHashSet();
+
+        foreach (var gone in existing.Where(m => !wantedIds.Contains(m.UserId)))
+            db.StokvelMembers.Remove(gone);
+
+        var haveIds = existing.Select(m => m.UserId).ToHashSet();
+        var nextPosition = existing.Count == 0 ? 1 : existing.Max(m => m.RotationPosition) + 1;
+
+        foreach (var user in stokvel.Members.Where(u => !haveIds.Contains(u.Id)))
+            db.StokvelMembers.Add(new StokvelMember(stokvel.Id, user.Id, nextPosition++));
+
+        await db.SaveChangesAsync();
+    }
+
+    public async Task<bool> DeleteAsync(Guid id) =>
+        await db.Stokvels.Where(s => s.Id == id).ExecuteDeleteAsync() > 0;
+}
+
+===== Data/IdempotencyStore.cs =====
+using System.Collections.Concurrent;
+using RondiTrack.Dtos;
+
+namespace RondiTrack.Data;
+
+public sealed record IdempotencyRecord(string RequestHash, ContributionResponse Response);
+
+public interface IIdempotencyStore
+{
+    Task<IdempotencyRecord?> GetAsync(string key);
+    Task SaveAsync(string key, IdempotencyRecord record);
+}
+
+public sealed class InMemoryIdempotencyStore : IIdempotencyStore
+{
+    private readonly ConcurrentDictionary<string, IdempotencyRecord> _records = new();
+
+    public Task<IdempotencyRecord?> GetAsync(string key)
+    {
+        _records.TryGetValue(key, out var record);
+        return Task.FromResult(record);
+    }
+
+    public Task SaveAsync(string key, IdempotencyRecord record)
+    {
+        _records[key] = record;
+        return Task.CompletedTask;
+    }
+}
+
+===== Data/RondiTrackDbContext.cs =====
+using Microsoft.EntityFrameworkCore;
+using RondiTrack.Domain;
+
+namespace RondiTrack.Data;
+
+public class RondiTrackDbContext : DbContext
+{
+    public RondiTrackDbContext(DbContextOptions<RondiTrackDbContext> options) : base(options) { }
+
+    public DbSet<User> Users => Set<User>();
+    public DbSet<Stokvel> Stokvels => Set<Stokvel>();
+    public DbSet<StokvelMember> StokvelMembers => Set<StokvelMember>();
+    public DbSet<ContributionCycle> ContributionCycles => Set<ContributionCycle>();
+    public DbSet<Contribution> Contributions => Set<Contribution>();
+    public DbSet<Payout> Payouts => Set<Payout>();
+
+    protected override void OnModelCreating(ModelBuilder b)
+    {
+        b.Entity<User>(e =>
+        {
+            e.HasKey(u => u.Id);
+            e.Property(u => u.FullName).HasMaxLength(User.MaxNameLength).IsRequired();
+            e.Property(u => u.Email).HasMaxLength(320).IsRequired();
+            e.Property(u => u.Version).IsRowVersion();   // ADDED 5.3: xmin concurrency token
+        });
+
+        b.Entity<Stokvel>(e =>
+        {
+            e.HasKey(s => s.Id);
+            e.Property(s => s.Name).HasMaxLength(Stokvel.MaxNameLength).IsRequired();
+            e.Property(s => s.ContributionAmount).HasPrecision(18, 2);
+            e.Property(s => s.Frequency).HasConversion<string>().HasMaxLength(20);
+            e.Property(s => s.Version).IsRowVersion();   // ADDED 5.3: xmin concurrency token
+
+            // Members is a read-only wrapper over a private list of Users, so EF Core cannot fill it.
+            // Membership is persisted through StokvelMember (the Memberships navigation) instead.
+            e.Ignore(s => s.Members);
+            e.Ignore(s => s.PayoutPerCycle); // calculated
+            e.Ignore(s => s.IsFull);         // calculated
+        });
+
+        // StokvelMember now has a COMPOSITE primary key and two real relationships
+        b.Entity<StokvelMember>(e =>
+        {
+            e.HasKey(m => new { m.UserId, m.StokvelId });   // composite natural key
+            e.Property(m => m.Role).HasConversion<string>().HasMaxLength(20);
+            // the old unique index on (StokvelId, UserId) is removed: the primary key does that job now
+            e.HasIndex(m => new { m.StokvelId, m.RotationPosition }).IsUnique();
+
+            e.HasOne(m => m.User)
+             .WithMany(u => u.Memberships)
+             .HasForeignKey(m => m.UserId)
+             .OnDelete(DeleteBehavior.Restrict);
+
+            e.HasOne(m => m.Stokvel)
+             .WithMany(s => s.Memberships)
+             .HasForeignKey(m => m.StokvelId)
+             .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        b.Entity<ContributionCycle>(e =>
+        {
+            e.HasKey(c => c.Id);
+            e.Property(c => c.TargetAmount).HasPrecision(18, 2);
+            e.Property(c => c.Status).HasConversion<string>().HasMaxLength(20);
+            e.Property(c => c.Version).IsRowVersion();   // ADDED 5.3: xmin concurrency token
+            // NOTE 5.3: NOT unique on purpose. "One cycle number per stokvel" is not checked in C# today,
+            // so it is written up as a gap in the README instead of being added as a new rule.
+            e.HasIndex(c => new { c.StokvelId, c.CycleNumber });
+
+            // The second one-to-many (Stokvel -> ContributionCycle)
+            e.HasOne(c => c.Stokvel)
+             .WithMany(s => s.Cycles)
+             .HasForeignKey(c => c.StokvelId)
+             .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        b.Entity<Contribution>(e =>
+        {
+            e.HasKey(c => c.Id);
+            e.Property(c => c.Amount).HasPrecision(18, 2);
+
+            // CHANGED 5.3: now UNIQUE. Database-level version of the C# rule
+            // "a member contributes once per cycle" (ContributionService -> ExistsAsync).
+            e.HasIndex(c => new { c.CycleId, c.UserId }).IsUnique();
+
+            // ADDED 5.3 (stage 2): composite index for the paged contributions query.
+            // CycleId first (equality filter), then RecordedAtUtc (the sort), then Id (the tiebreaker),
+            // so Postgres reads one cycle's rows already in order and can stop after LIMIT.
+            e.HasIndex(c => new { c.CycleId, c.RecordedAtUtc, c.Id })
+             .HasDatabaseName("IX_Contributions_CycleId_RecordedAtUtc_Id");
+
+            // Composite foreign key to ONE specific membership (same order as the primary key)
+            e.HasOne(c => c.Member)
+             .WithMany(m => m.Contributions)
+             .HasForeignKey(c => new { c.UserId, c.StokvelId })
+             .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        b.Entity<Payout>(e =>
+        {
+            e.HasKey(p => p.Id);
+            e.Property(p => p.Amount).HasPrecision(18, 2);
+            e.Property(p => p.Version).IsRowVersion();   // ADDED 5.3: xmin concurrency token
+            e.HasIndex(p => p.CycleId).IsUnique(); // a cycle can only be paid out once
+
+            // ADDED 5.3: a member is paid at most once per stokvel rotation.
+            // Database-level version of the C# rule in PayoutService ("Every member has already been paid").
+            e.HasIndex(p => new { p.StokvelId, p.RecipientUserId }).IsUnique();
+
+            // EDIT 5.2: the recipient is one specific membership (composite foreign key, no navigation property)
+            e.HasOne<StokvelMember>()
+             .WithMany()
+             .HasForeignKey(p => new { p.RecipientUserId, p.StokvelId })
+             .OnDelete(DeleteBehavior.Restrict);
+        });
+    }
+}
+
+===== Data/SeedData.cs =====
+using Microsoft.EntityFrameworkCore;
+using RondiTrack.Domain;
+
+namespace RondiTrack.Data;
+
+internal static class SeedData
+{
+    public static IReadOnlyList<User> Users { get; }
+    public static IReadOnlyList<Stokvel> Stokvels { get; }
+
+    static SeedData()
+    {
+        var thandi  = new User(Guid.Parse("10000000-0000-0000-0000-000000000001"), "Thandi Nkosi",   "thandi.nkosi@example.com");
+        var sipho   = new User(Guid.Parse("10000000-0000-0000-0000-000000000002"), "Sipho Dlamini",  "sipho.dlamini@example.com");
+        var lerato  = new User(Guid.Parse("10000000-0000-0000-0000-000000000003"), "Lerato Mokoena", "lerato.mokoena@example.com");
+        var kagiso  = new User(Guid.Parse("10000000-0000-0000-0000-000000000004"), "Kagiso Molefe",  "kagiso.molefe@example.com");
+        var naledi  = new User(Guid.Parse("10000000-0000-0000-0000-000000000005"), "Naledi Khumalo", "naledi.khumalo@example.com");
+        var bongani = new User(Guid.Parse("10000000-0000-0000-0000-000000000006"), "Bongani Zulu",   "bongani.zulu@example.com");
+
+        var ubuntu = new Stokvel(Guid.Parse("20000000-0000-0000-0000-000000000001"),
+            "Ubuntu Savers", 500m, ContributionFrequency.Monthly, 6);
+        ubuntu.AddMember(thandi);
+        ubuntu.AddMember(sipho);
+        ubuntu.AddMember(lerato);
+
+        var grocery = new Stokvel(Guid.Parse("20000000-0000-0000-0000-000000000002"),
+            "Festive Grocery Club", 250m, ContributionFrequency.Monthly, 3);
+        grocery.AddMember(thandi);
+        grocery.AddMember(kagiso);
+        grocery.AddMember(naledi);
+
+        Users = [thandi, sipho, lerato, kagiso, naledi, bongani];
+        Stokvels = [ubuntu, grocery];
+    }
+
+    // New method. Puts the demo data into Postgres once (Development only)
+    public static async Task EnsureSeededAsync(RondiTrackDbContext db)
+    {
+        if (await db.Users.AnyAsync()) return;
+
+        try
+        {
+            // Fresh objects, so parallel hosts never share tracked instances
+            var users = Users.Select(u => new User(u.Id, u.FullName, u.Email)).ToList();
+            var stokvels = Stokvels
+                .Select(s => new Stokvel(s.Id, s.Name, s.ContributionAmount, s.Frequency, s.MaxMembers))
+                .ToList();
+
+            db.Users.AddRange(users);
+            db.Stokvels.AddRange(stokvels);
+            await db.SaveChangesAsync(); // parents first
+
+            foreach (var s in Stokvels)
+            {
+                var position = 1;
+                foreach (var member in s.Members)
+                    db.StokvelMembers.Add(new StokvelMember(s.Id, member.Id, position++));
+            }
+            await db.SaveChangesAsync();
+        }
+        catch (DbUpdateException)
+        {
+            // another test host seeded at the same moment, nothing to do
+        }
+    }
+}
+
+===== Data/StokvelMemberRepository.cs =====
+using Microsoft.EntityFrameworkCore;
+using RondiTrack.Domain;
+
+namespace RondiTrack.Data;
+
+// New file. Dedicated access for StokvelMember (composite key = two ids)
+public interface IStokvelMemberRepository
+{
+    // forUpdate: false = pure read (not tracked), true = I will change it and save
+    Task<StokvelMember?> GetAsync(Guid userId, Guid stokvelId, bool forUpdate = false);
+    Task<IReadOnlyList<StokvelMember>> GetByStokvelAsync(Guid stokvelId);
+    Task AddAsync(StokvelMember member);
+    Task RemoveAsync(StokvelMember member);
+}
+
+public sealed class EfStokvelMemberRepository(RondiTrackDbContext db) : IStokvelMemberRepository
+{
+    public async Task<StokvelMember?> GetAsync(Guid userId, Guid stokvelId, bool forUpdate = false)
+    {
+        IQueryable<StokvelMember> query = db.StokvelMembers;
+        if (!forUpdate)
+            query = query.AsNoTracking();   // pure read: cheaper, nothing to save
+
+        return await query.FirstOrDefaultAsync(m => m.UserId == userId && m.StokvelId == stokvelId);
+    }
+
+    public async Task<IReadOnlyList<StokvelMember>> GetByStokvelAsync(Guid stokvelId) =>
+        await db.StokvelMembers
+            .AsNoTracking()
+            .Where(m => m.StokvelId == stokvelId)
+            .OrderBy(m => m.RotationPosition)
+            .ToListAsync();
+
+    public async Task AddAsync(StokvelMember member)
+    {
+        db.StokvelMembers.Add(member);
+        await db.SaveChangesAsync();
+    }
+
+    public async Task RemoveAsync(StokvelMember member)
+    {
+        db.StokvelMembers.Remove(member);
+        await db.SaveChangesAsync();
+    }
+}
+
+===== Data/StokvelRepository.cs =====
+using System.Collections.Concurrent;
+using RondiTrack.Domain;
+
+namespace RondiTrack.Data;
+
+public interface IStokvelRepository
+{
+    Task<IReadOnlyList<Stokvel>> GetAllAsync();
+    Task<Stokvel?> GetByIdAsync(Guid id);
+    Task<bool> AnyWithMemberAsync(Guid userId);
+    Task AddAsync(Stokvel stokvel);
+    Task UpdateAsync(Stokvel stokvel);
+    Task<bool> DeleteAsync(Guid id);
+}
+
+public sealed class InMemoryStokvelRepository : IStokvelRepository
+{
+    private readonly ConcurrentDictionary<Guid, Stokvel> _stokvels = new();
+
+    public InMemoryStokvelRepository()
+    {
+        foreach (var stokvel in SeedData.Stokvels)
+            _stokvels[stokvel.Id] = stokvel;
+    }
+
+    public Task<IReadOnlyList<Stokvel>> GetAllAsync() =>
+        Task.FromResult<IReadOnlyList<Stokvel>>(_stokvels.Values.OrderBy(s => s.Name).ToList());
+
+    public Task<Stokvel?> GetByIdAsync(Guid id)
+    {
+        _stokvels.TryGetValue(id, out var stokvel);
+        return Task.FromResult<Stokvel?>(stokvel);
+    }
+
+    public Task<bool> AnyWithMemberAsync(Guid userId) =>
+        Task.FromResult(_stokvels.Values.Any(s => s.HasMember(userId)));
+
+    public Task AddAsync(Stokvel stokvel)
+    {
+        _stokvels[stokvel.Id] = stokvel;
+        return Task.CompletedTask;
+    }
+
+    public Task UpdateAsync(Stokvel stokvel)
+    {
+        _stokvels[stokvel.Id] = stokvel;
+        return Task.CompletedTask;
+    }
+
+    public Task<bool> DeleteAsync(Guid id) => Task.FromResult(_stokvels.TryRemove(id, out _));
+}
+
+===== Data/UserRepository.cs =====
+using System.Collections.Concurrent;
+using RondiTrack.Domain;
+
+namespace RondiTrack.Data;
+
+public interface IUserRepository
+{
+    Task<IReadOnlyList<User>> GetAllAsync();
+    Task<User?> GetByIdAsync(Guid id);
+    Task<bool> EmailExistsAsync(string email, Guid? excludingUserId = null);
+    Task AddAsync(User user);
+    Task UpdateAsync(User user);
+    Task<bool> DeleteAsync(Guid id);
+}
+
+public sealed class InMemoryUserRepository : IUserRepository
+{
+    private readonly ConcurrentDictionary<Guid, User> _users = new();
+
+    public InMemoryUserRepository()
+    {
+        foreach (var user in SeedData.Users)
+            _users[user.Id] = user;
+    }
+
+    public Task<IReadOnlyList<User>> GetAllAsync() =>
+        Task.FromResult<IReadOnlyList<User>>(_users.Values.OrderBy(u => u.FullName).ToList());
+
+    public Task<User?> GetByIdAsync(Guid id)
+    {
+        _users.TryGetValue(id, out var user);
+        return Task.FromResult<User?>(user);
+    }
+
+    public Task<bool> EmailExistsAsync(string email, Guid? excludingUserId = null)
+    {
+        var normalized = email.Trim();
+        var exists = _users.Values.Any(u =>
+            u.Id != excludingUserId &&
+            string.Equals(u.Email, normalized, StringComparison.OrdinalIgnoreCase));
+        return Task.FromResult(exists);
+    }
+
+    public Task AddAsync(User user)
+    {
+        _users[user.Id] = user;
+        return Task.CompletedTask;
+    }
+
+    public Task UpdateAsync(User user)
+    {
+        _users[user.Id] = user;
+        return Task.CompletedTask;
+    }
+
+    public Task<bool> DeleteAsync(Guid id) => Task.FromResult(_users.TryRemove(id, out _));
+}
+
+===== Data/VolumeSeeder.cs =====
+using Microsoft.EntityFrameworkCore;
+using RondiTrack.Domain;
+
+namespace RondiTrack.Data;
+
+// NEW 5.3: creates 3 stokvels x 100 members x 60 cycles = 18 000 contributions (100 per cycle).
+// It NEVER runs on startup. Only when you start the app with:  dotnet run -- --seed-volume
+// Members are added as StokvelMember rows directly (the 50-member cap is a rule inside the Stokvel class,
+// the database does not enforce it), so each cycle gets 100 contributions.
+public static class VolumeSeeder
+{
+    private const int StokvelCount = 3;
+    private const int MembersPerStokvel = 100;
+    private const int CyclesPerStokvel = 60;
+
+    public static async Task RunAsync(RondiTrackDbContext db)
+    {
+        if (await db.Stokvels.AnyAsync(s => s.Name == "Volume Stokvel 1"))
+        {
+            Console.WriteLine("Volume data already exists. Nothing to do.");
+            return;
+        }
+
+        var rnd = new Random(42);   // fixed seed: same data every time
+        var start = new DateTime(2023, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
+        for (var s = 1; s <= StokvelCount; s++)
+        {
+            var stokvel = new Stokvel($"Volume Stokvel {s}", 100m, ContributionFrequency.Monthly, 50);
+            var users = Enumerable.Range(1, MembersPerStokvel)
+                .Select(i => new User($"Volume User {s}-{i}", $"vol{s}-{i}@volume.example.com"))
+                .ToList();
+
+            db.Stokvels.Add(stokvel);
+            db.Users.AddRange(users);
+            await db.SaveChangesAsync();                         // parents first
+
+            db.StokvelMembers.AddRange(users.Select((u, i) => new StokvelMember(stokvel.Id, u.Id, i + 1)));
+            var cycles = Enumerable.Range(1, CyclesPerStokvel)
+                .Select(n => new ContributionCycle(stokvel.Id, n, 10_000m))
+                .ToList();
+            db.ContributionCycles.AddRange(cycles);
+            await db.SaveChangesAsync();                         // then members and cycles
+
+            foreach (var cycle in cycles)
+                foreach (var user in users)
+                {
+                    var c = new Contribution(stokvel.Id, user.Id, cycle.Id, rnd.Next(10, 100) * 10m);
+                    db.Contributions.Add(c);
+                    // RecordedAtUtc has a private setter, so set it through EF. Only 6 distinct hours per cycle,
+                    // so many rows share the same date on purpose (that is what makes the tiebreaker matter).
+                    db.Entry(c).Property(nameof(Contribution.RecordedAtUtc)).CurrentValue =
+                        start.AddDays(cycle.CycleNumber * 30).AddHours(rnd.Next(0, 6));
+                }
+
+            await db.SaveChangesAsync();                         // then contributions
+            db.ChangeTracker.Clear();
+            Console.WriteLine($"Seeded Volume Stokvel {s}.");
+        }
+
+        Console.WriteLine("Done: 3 stokvels, 300 users, 180 cycles, 18 000 contributions.");
+    }
+}
+
+===== Domain/Contribution.cs =====
+namespace RondiTrack.Domain;
+
+public sealed class Contribution
+{
+    public Guid Id { get; private set; }
+    public Guid StokvelId { get; private set; }
+    public Guid UserId { get; private set; }
+    public Guid CycleId { get; private set; }   // stays a bare Guid on purpose (a stated "not yet")
+    public decimal Amount { get; private set; }
+    public DateTime RecordedAtUtc { get; private set; }
+
+    // Points at ONE specific membership (composite foreign key UserId + StokvelId)
+    public StokvelMember Member { get; private set; } = null!;
+
+    private Contribution() { } // for EF Core only
+
+    public Contribution(Guid stokvelId, Guid userId, Guid cycleId, decimal amount)
+    {
+        if (amount <= 0)
+            throw new DomainValidationException("Contribution amount must be greater than zero.");
+
+        if (decimal.Round(amount, 2) != amount)
+            throw new DomainValidationException("Amount cannot have more than 2 decimal places.");
+
+        Id = Guid.NewGuid();
+        StokvelId = stokvelId;
+        UserId = userId;
+        CycleId = cycleId;
+        Amount = amount;
+        RecordedAtUtc = DateTime.UtcNow;
+    }
+}
+
+===== Domain/ContributionCycle.cs =====
+namespace RondiTrack.Domain;
+
+public sealed class ContributionCycle
+{
+    public Guid Id { get; private set; }
+    public Guid StokvelId { get; private set; }
+    public int CycleNumber { get; private set; }
+    public decimal TargetAmount { get; private set; }
+    public CycleStatus Status { get; private set; } = CycleStatus.Open;
+    public DateTime CreatedAtUtc { get; private set; }
+
+    // ADDED 5.3: PostgreSQL's built-in row version (xmin). Not a real column.
+    public uint Version { get; private set; }
+
+    // Real navigation (the second one-to-many: Stokvel -> ContributionCycle)
+    public Stokvel Stokvel { get; private set; } = null!;
+
+    private ContributionCycle() { } // for EF Core only
+
+    public ContributionCycle(Guid stokvelId, int cycleNumber, decimal targetAmount)
+    {
+        if (cycleNumber < 1)
+            throw new DomainValidationException("Cycle number must be 1 or greater.");
+        if (targetAmount <= 0)
+            throw new DomainValidationException("Target amount must be greater than zero.");
+
+        Id = Guid.NewGuid();
+        StokvelId = stokvelId;
+        CycleNumber = cycleNumber;
+        TargetAmount = targetAmount;
+        CreatedAtUtc = DateTime.UtcNow;
+    }
+
+    // ADDED 5.3: "the client last saw THIS version". Called before saving an update from a PUT.
+    public void SetExpectedVersion(uint version) => Version = version;
+
+    public void UpdateDetails(int cycleNumber, decimal targetAmount)
+    {
+        if (cycleNumber < 1)
+            throw new DomainValidationException("Cycle number must be 1 or greater.");
+        if (targetAmount <= 0)
+            throw new DomainValidationException("Target amount must be greater than zero.");
+
+        CycleNumber = cycleNumber;
+        TargetAmount = targetAmount;
+    }
+
+    public void MarkPaidOut()
+    {
+        if (Status != CycleStatus.Open)
+            throw new DomainConflictException("This cycle has already been paid out.");
+
+        Status = CycleStatus.PaidOut;
+    }
+}
+
+===== Domain/ContributionFrequency.cs =====
+namespace RondiTrack.Domain;
+
+public enum ContributionFrequency
+{
+    Weekly = 1,
+    Fortnightly = 2,
+    Monthly = 3
+}
+
+===== Domain/CycleStatus.cs =====
+namespace RondiTrack.Domain;
+
+public enum CycleStatus
+{
+    Open = 0,
+    PaidOut = 1
+}
+
+===== Domain/DomainExceptions.cs =====
+namespace RondiTrack.Domain;
+
+public abstract class DomainException(string message) : Exception(message);
+
+public sealed class DomainValidationException(string message) : DomainException(message);
+
+public sealed class DomainConflictException(string message) : DomainException(message);
+
+public sealed class DomainNotFoundException(string message) : DomainException(message);
+
+public sealed class DomainReferenceException(string message) : DomainException(message);
+
+===== Domain/Payout.cs =====
+namespace RondiTrack.Domain;
+
+public sealed class Payout
+{
+    public Guid Id { get; private set; }
+    public Guid StokvelId { get; private set; }
+    public Guid CycleId { get; private set; }
+    // EDIT 5.2: was RecipientMemberId (a StokvelMember.Id that no longer exists).
+    // Together with StokvelId this identifies one membership.
+    public Guid RecipientUserId { get; private set; }
+    public decimal Amount { get; private set; }
+    public DateTime PaidAtUtc { get; private set; }
+
+    // ADDED 5.3: PostgreSQL's built-in row version (xmin). Not a real column, EF reads it from the system column.
+    public uint Version { get; private set; }
+
+    private Payout() { } // for EF Core only
+
+    public Payout(Guid stokvelId, Guid cycleId, Guid recipientUserId, decimal amount)
+    {
+        if (amount <= 0)
+            throw new DomainValidationException("Payout amount must be greater than zero.");
+
+        Id = Guid.NewGuid();
+        StokvelId = stokvelId;
+        CycleId = cycleId;
+        RecipientUserId = recipientUserId;
+        Amount = amount;
+        PaidAtUtc = DateTime.UtcNow;
+    }
+}
+
+===== Domain/Stokvel.cs =====
+namespace RondiTrack.Domain;
+
+public sealed class Stokvel
+{
+    public const int MaxNameLength = 100;
+    public const int MinMembers = 2;
+    public const int MaxMembersLimit = 50;
+    public const decimal MaxContribution = 1_000_000m;
+
+    private readonly List<User> _members = [];
+
+    public Guid Id { get; private set; }
+    public string Name { get; private set; }
+    public decimal ContributionAmount { get; private set; }
+    public ContributionFrequency Frequency { get; private set; }
+    public int MaxMembers { get; private set; }
+    public DateTime CreatedAtUtc { get; private set; }
+
+    // ADDED 5.3: PostgreSQL's built-in row version (xmin). Not a real column.
+    public uint Version { get; private set; }
+
+    public IReadOnlyCollection<User> Members => _members.AsReadOnly();
+    public decimal PayoutPerCycle => ContributionAmount * _members.Count;
+    public bool IsFull => _members.Count >= MaxMembers;
+
+    // The real EF Core navigations (Members above stays for the business rules)
+    public List<StokvelMember> Memberships { get; } = [];
+    public List<ContributionCycle> Cycles { get; } = [];
+
+    private Stokvel() { Name = null!; } // for EF Core only
+
+    public Stokvel(string name, decimal contributionAmount, ContributionFrequency frequency, int maxMembers)
+    {
+        Id = Guid.NewGuid();
+        CreatedAtUtc = DateTime.UtcNow;
+        Name = ValidateName(name);
+        ContributionAmount = ValidateAmount(contributionAmount);
+        Frequency = ValidateFrequency(frequency);
+        MaxMembers = ValidateMaxMembers(maxMembers);
+    }
+
+    internal Stokvel(Guid id, string name, decimal contributionAmount,
+        ContributionFrequency frequency, int maxMembers)
+        : this(name, contributionAmount, frequency, maxMembers)
+    {
+        Id = id;
+    }
+
+    // Used by EfStokvelRepository to fill the member list after loading from the database
+    internal void LoadMembers(IEnumerable<User> users)
+    {
+        _members.Clear();
+        _members.AddRange(users);
+    }
+
+    // ADDED 5.3: "the client last saw THIS version". Called before saving an update from a PUT.
+    public void SetExpectedVersion(uint version) => Version = version;
+
+    public void UpdateDetails(string name, decimal contributionAmount,
+        ContributionFrequency frequency, int maxMembers)
+    {
+        var validName = ValidateName(name);
+        var validAmount = ValidateAmount(contributionAmount);
+        var validFrequency = ValidateFrequency(frequency);
+        var validMax = ValidateMaxMembers(maxMembers);
+
+        if (validMax < _members.Count)
+            throw new DomainConflictException(
+                $"Cannot reduce capacity to {validMax}: '{validName}' already has {_members.Count} members.");
+
+        Name = validName;
+        ContributionAmount = validAmount;
+        Frequency = validFrequency;
+        MaxMembers = validMax;
+    }
+
+    public void AddMember(User user)
+    {
+        ArgumentNullException.ThrowIfNull(user);
+
+        if (HasMember(user.Id))
+            throw new DomainConflictException($"{user.FullName} is already a member of '{Name}'.");
+
+        if (IsFull)
+            throw new DomainConflictException($"'{Name}' is full ({MaxMembers} members).");
+
+        _members.Add(user);
+    }
+
+    public bool RemoveMember(Guid userId) => _members.RemoveAll(m => m.Id == userId) > 0;
+
+    public bool HasMember(Guid userId) => _members.Any(m => m.Id == userId);
+
+    public User? FindMember(Guid userId) => _members.FirstOrDefault(m => m.Id == userId);
+
+    private static string ValidateName(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+            throw new DomainValidationException("Stokvel name is required.");
+
+        var trimmed = name.Trim();
+        if (trimmed.Length > MaxNameLength)
+            throw new DomainValidationException($"Stokvel name cannot exceed {MaxNameLength} characters.");
+
+        return trimmed;
+    }
+
+    private static decimal ValidateAmount(decimal amount)
+    {
+        if (amount <= 0)
+            throw new DomainValidationException("Contribution amount must be greater than zero.");
+
+        if (amount > MaxContribution)
+            throw new DomainValidationException($"Contribution amount cannot exceed R{MaxContribution:N0}.");
+
+        if (decimal.Round(amount, 2) != amount)
+            throw new DomainValidationException("Contribution amount cannot have more than 2 decimal places.");
+
+        return amount;
+    }
+
+    private static ContributionFrequency ValidateFrequency(ContributionFrequency frequency)
+    {
+        if (!Enum.IsDefined(frequency))
+            throw new DomainValidationException("Frequency must be Weekly, Fortnightly or Monthly.");
+
+        return frequency;
+    }
+
+    private static int ValidateMaxMembers(int maxMembers)
+    {
+        if (maxMembers < MinMembers || maxMembers > MaxMembersLimit)
+            throw new DomainValidationException(
+                $"Max members must be between {MinMembers} and {MaxMembersLimit}.");
+
+        return maxMembers;
+    }
+}
+
+===== Domain/StokvelMember.cs =====
+namespace RondiTrack.Domain;
+
+public sealed class StokvelMember
+{
+    // the old "Guid Id" is GONE. The key is now the pair (UserId, StokvelId)
+    public Guid UserId { get; private set; }
+    public Guid StokvelId { get; private set; }
+    public StokvelRole Role { get; private set; }            // EDIT 5.2: new
+    public int RotationPosition { get; private set; }
+    public DateTime JoinedAtUtc { get; private set; }
+
+    // real navigations
+    public User User { get; private set; } = null!;
+    public Stokvel Stokvel { get; private set; } = null!;
+    public List<Contribution> Contributions { get; } = [];
+
+    private StokvelMember() { } // for EF Core only
+
+    public StokvelMember(Guid stokvelId, Guid userId, int rotationPosition,
+        StokvelRole role = StokvelRole.Member)
+    {
+        if (rotationPosition < 1)
+            throw new DomainValidationException("Rotation position must be 1 or higher.");
+
+        StokvelId = stokvelId;
+        UserId = userId;
+        RotationPosition = rotationPosition;
+        Role = role;
+        JoinedAtUtc = DateTime.UtcNow;
+    }
+}
+
+===== Domain/StokvelRole.cs =====
+namespace RondiTrack.Domain;
+
+// The role a member has inside one stokvel
+public enum StokvelRole
+{
+    Member = 0,
+    Treasurer = 1,
+    Admin = 2
+}
+
+===== Domain/User.cs =====
+using System.Net.Mail;
+
+namespace RondiTrack.Domain;
+
+public sealed class User
+{
+    public const int MaxNameLength = 100;
+
+    public Guid Id { get; private set; }
+    public string FullName { get; private set; }
+    public string Email { get; private set; }
+    public DateTime CreatedAtUtc { get; private set; }
+
+    // ADDED 5.3: PostgreSQL's built-in row version (xmin). Not a real column.
+    public uint Version { get; private set; }
+
+    // Real navigation, one user has many memberships
+    public List<StokvelMember> Memberships { get; } = [];
+
+    private User() { FullName = null!; Email = null!; } // for EF Core only
+
+    public User(string fullName, string email)
+    {
+        Id = Guid.NewGuid();
+        CreatedAtUtc = DateTime.UtcNow;
+        FullName = ValidateName(fullName);
+        Email = ValidateEmail(email);
+    }
+
+    internal User(Guid id, string fullName, string email) : this(fullName, email)
+    {
+        Id = id;
+    }
+
+    // ADDED 5.3: "the client last saw THIS version". Called before saving an update from a PUT.
+    public void SetExpectedVersion(uint version) => Version = version;
+
+    public void UpdateDetails(string fullName, string email)
+    {
+        var validName = ValidateName(fullName);
+        var validEmail = ValidateEmail(email);
+        FullName = validName;
+        Email = validEmail;
+    }
+
+    private static string ValidateName(string? fullName)
+    {
+        if (string.IsNullOrWhiteSpace(fullName))
+            throw new DomainValidationException("Full name is required.");
+
+        var trimmed = fullName.Trim();
+        if (trimmed.Length > MaxNameLength)
+            throw new DomainValidationException($"Full name cannot exceed {MaxNameLength} characters.");
+
+        return trimmed;
+    }
+
+    private static string ValidateEmail(string? email)
+    {
+        if (string.IsNullOrWhiteSpace(email))
+            throw new DomainValidationException("Email is required.");
+
+        var trimmed = email.Trim();
+        if (!MailAddress.TryCreate(trimmed, out var parsed)
+            || parsed.Address != trimmed
+            || !parsed.Host.Contains('.'))
+            throw new DomainValidationException("Email address is not valid.");
+
+        return trimmed.ToLowerInvariant();
+    }
+}
+
+===== Dtos/ContributionCycleDtos.cs =====
+namespace RondiTrack.Dtos;
+
+public sealed record ContributionCycleRequest(int CycleNumber, decimal TargetAmount);
+
+public sealed record ContributionCycleResponse(Guid Id, Guid StokvelId, int CycleNumber, decimal TargetAmount, DateTime CreatedAtUtc);
+
+===== Dtos/ContributionDtos.cs =====
+using RondiTrack.Domain;
+
+namespace RondiTrack.Dtos;
+
+public sealed record ContributionRequest(Guid UserId, Guid CycleId, decimal Amount);
+
+public sealed record ContributionResponse(
+    Guid Id,
+    Guid StokvelId,
+    Guid UserId,
+    Guid CycleId,
+    decimal Amount,
+    DateTime RecordedAtUtc);
+
+// New. The shape the contributions-by-cycle endpoint returns
+public sealed record ContributionDetailResponse(
+    Guid Id,
+    Guid UserId,
+    string MemberName,
+    string MemberEmail,
+    StokvelRole Role,
+    int RotationPosition,
+    decimal Amount,
+    DateTime RecordedAtUtc);
+
+===== Dtos/ContributionListQuery.cs =====
+namespace RondiTrack.Dtos;
+
+// CHANGED: the allow-list of everything a client may send to the contributions list endpoint.
+// Anything not in this class is ignored; an unknown "sort" value is rejected with 400.
+public class ContributionListQuery
+{
+    public int? PageSize { get; set; }
+    public string? PageToken { get; set; }
+    public string? Sort { get; set; }        // date | -date | amount | -amount   (default: date)
+    public Guid? UserId { get; set; }        // filter: one member
+    public DateTime? DateFrom { get; set; }  // filter: recorded at or after (inclusive)
+    public DateTime? DateTo { get; set; }    // filter: recorded at or before (inclusive)
+}
+
+===== Dtos/MappingExtensions.cs =====
+using RondiTrack.Domain;
+
+namespace RondiTrack.Dtos;
+
+public static class MappingExtensions
+{
+    public static UserResponse ToResponse(this User user) =>
+        new(user.Id, user.FullName, user.Email, user.CreatedAtUtc);
+
+    public static StokvelResponse ToResponse(this Stokvel stokvel) =>
+        new(stokvel.Id, stokvel.Name, stokvel.ContributionAmount, stokvel.Frequency,
+            stokvel.MaxMembers, stokvel.Members.Count, stokvel.IsFull, stokvel.PayoutPerCycle,
+            stokvel.CreatedAtUtc);
+
+    public static ContributionResponse ToResponse(this Contribution contribution) =>
+        new(contribution.Id, contribution.StokvelId, contribution.UserId,
+            contribution.CycleId, contribution.Amount, contribution.RecordedAtUtc);
+
+    public static ContributionCycleResponse ToResponse(this ContributionCycle cycle) =>
+        new(cycle.Id, cycle.StokvelId, cycle.CycleNumber, cycle.TargetAmount, cycle.CreatedAtUtc);
+}
+
+===== Dtos/PayoutDtos.cs =====
+namespace RondiTrack.Dtos;
+
+public sealed record PayoutResponse(
+    Guid Id,
+    Guid StokvelId,
+    Guid CycleId,
+    Guid RecipientUserId,   // Was RecipientMemberId
+    decimal Amount,
+    DateTime PaidAtUtc);
+
+===== Dtos/StokvelDtos.cs =====
+using RondiTrack.Domain;
+
+namespace RondiTrack.Dtos;
+
+public sealed record StokvelRequest(
+    string Name,
+    decimal ContributionAmount,
+    ContributionFrequency Frequency,
+    int MaxMembers);
+
+public sealed record StokvelResponse(
+    Guid Id,
+    string Name,
+    decimal ContributionAmount,
+    ContributionFrequency Frequency,
+    int MaxMembers,
+    int MemberCount,
+    bool IsFull,
+    decimal PayoutPerCycle,
+    DateTime CreatedAtUtc);
+
+public sealed record AddMemberRequest(Guid UserId);
+
+===== Dtos/UserDtos.cs =====
+namespace RondiTrack.Dtos;
+
+public sealed record UserRequest(string FullName, string Email);
+
+public sealed record UserResponse(Guid Id, string FullName, string Email, DateTime CreatedAtUtc);
+
+===== Errors/RondiExceptionHandler.cs =====
+using FluentValidation;
+using Microsoft.AspNetCore.Diagnostics;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using Npgsql;
+using RondiTrack.Api.Common.Paging;
+using RondiTrack.Common;
+using RondiTrack.Domain;
+using System.Text.Json;
+
+namespace RondiTrack.Errors;
+
+public sealed class RondiExceptionHandler(ILogger<RondiExceptionHandler> logger) : IExceptionHandler
+{
+    public async ValueTask<bool> TryHandleAsync(HttpContext httpContext, Exception exception, CancellationToken cancellationToken)
+    {
+        var correlationId = httpContext.TraceIdentifier;
+
+        var status = StatusCodes.Status500InternalServerError;
+        var title = "Internal Server Error";
+        var detail = "An unexpected error occurred.";
+
+        if (exception is ValidationException vex)
+        {
+            status = StatusCodes.Status400BadRequest;
+            title = "Validation Failed";
+            detail = string.Join(" ", vex.Errors.Select(e => e.ErrorMessage));
+        }
+        else if (exception is DomainNotFoundException)
+        {
+            status = StatusCodes.Status404NotFound;
+            title = "Not Found";
+            detail = exception.Message;
+        }
+        else if (exception is DomainConflictException)
+        {
+            status = StatusCodes.Status409Conflict;
+            title = "Conflict";
+            detail = exception.Message;
+        }
+        else if (exception is DomainReferenceException)
+        {
+            status = StatusCodes.Status422UnprocessableEntity;
+            title = "Unprocessable Entity";
+            detail = exception.Message;
+        }
+        else if (exception is DomainValidationException)
+        {
+            status = StatusCodes.Status400BadRequest;
+            title = "Bad Request";
+            detail = exception.Message;
+        }
+        // ADDED 5.3: bad paging / sort / filter / token input -> 400
+        else if (exception is ApiBadRequestException)
+        {
+            status = StatusCodes.Status400BadRequest;
+            title = "Bad Request";
+            detail = exception.Message;
+        }
+        // ADDED 5.3: update sent without If-Match -> 428
+        else if (exception is PreconditionRequiredException)
+        {
+            status = StatusCodes.Status428PreconditionRequired;
+            title = "Precondition Required";
+            detail = exception.Message;
+        }
+        // ADDED 5.3: xmin token was stale. If the client sent If-Match, the precondition failed (412).
+        // If there was no If-Match (a race inside the server, e.g. two payouts at once), it is a plain 409.
+        else if (exception is DbUpdateConcurrencyException)
+        {
+            if (httpContext.Request.Headers.ContainsKey("If-Match"))
+            {
+                status = StatusCodes.Status412PreconditionFailed;
+                title = "Precondition Failed";
+                detail = "This record was changed by someone else since you loaded it. Reload it and try again.";
+            }
+            else
+            {
+                status = StatusCodes.Status409Conflict;
+                title = "Conflict";
+                detail = "This record was changed by someone else at the same time. Reload it and try again.";
+            }
+        }
+        // ADDED 5.3: a database unique constraint fired (SQLSTATE 23505) -> 409 instead of 500
+        else if (exception is DbUpdateException { InnerException: PostgresException { SqlState: PostgresErrorCodes.UniqueViolation } })
+        {
+            status = StatusCodes.Status409Conflict;
+            title = "Conflict";
+            detail = "That record already exists (it would break a uniqueness rule).";
+        }
+
+        logger.LogError(exception, "Request failed with status {Status}. CorrelationId: {CorrelationId}", status, correlationId);
+
+        var problemDetails = new ProblemDetails
+        {
+            Status = status,
+            Title = title,
+            Detail = detail
+        };
+        problemDetails.Extensions["correlationId"] = correlationId;
+
+        httpContext.Response.StatusCode = status;
+        httpContext.Response.ContentType = "application/problem+json";
+
+        var json = JsonSerializer.Serialize(problemDetails);
+        await httpContext.Response.WriteAsync(json, cancellationToken);
+
+        return true;
+    }
+}
+
+===== Program.cs =====
+using System.Text.Json.Serialization;
+using FluentValidation;
+using Microsoft.EntityFrameworkCore;
+using RondiTrack.Data;
+using RondiTrack.Errors;
+using RondiTrack.Services;
+using RondiTrack.Validation;
+using Scalar.AspNetCore;
+
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services
+    .AddControllers(o => o.Filters.Add<ValidationFilter>())
+    .AddJsonOptions(o => o.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter()));
+
+builder.Services.AddOpenApi();
+builder.Services.AddProblemDetails();
+builder.Services.AddExceptionHandler<RondiExceptionHandler>();
+
+builder.Services.AddValidatorsFromAssemblyContaining<Program>();
+
+var connectionString = builder.Configuration.GetConnectionString("RondiTrack")
+    ?? throw new InvalidOperationException(
+        "Set ConnectionStrings:RondiTrack with dotnet user-secrets.");
+
+builder.Services.AddDbContext<RondiTrackDbContext>(o =>
+{
+    o.UseNpgsql(connectionString, n => n.EnableRetryOnFailure(
+        maxRetryCount: 4,
+        maxRetryDelay: TimeSpan.FromSeconds(10),
+        errorCodesToAdd: null));
+
+    // ADDED 5.3: Development only. Shows real parameter values in the SQL log,
+    // so the logged SQL can be pasted straight into EXPLAIN ANALYZE.
+    o.EnableSensitiveDataLogging(builder.Environment.IsDevelopment());
+});
+
+// Still in-memory on purpose (not part of today's work)
+builder.Services.AddSingleton<IIdempotencyStore, InMemoryIdempotencyStore>();
+
+// Everything below is EF Core now. Scoped, because a DbContext lives for one request
+builder.Services.AddScoped<IUserRepository, EfUserRepository>();
+builder.Services.AddScoped<IStokvelRepository, EfStokvelRepository>();
+builder.Services.AddScoped<IContributionCycleRepository, EfContributionCycleRepository>();
+builder.Services.AddScoped<IContributionRepository, EfContributionRepository>();
+builder.Services.AddScoped<IStokvelMemberRepository, EfStokvelMemberRepository>();   // EDIT 5.2: new
+builder.Services.AddScoped<IContributionQueries, ContributionQueries>();               // EDIT 5.2: new
+
+// ADDED 5.3: the two paging services
+builder.Services.AddScoped<ContributionPagingService>();
+builder.Services.AddScoped<MemberPagingService>();
+
+builder.Services.AddScoped<IStokvelMembershipService, StokvelMembershipService>();
+builder.Services.AddScoped<IContributionService, ContributionService>();
+
+builder.Services.AddScoped<IPayoutFaultHook, NoOpPayoutFaultHook>();
+builder.Services.AddScoped<IPayoutService, PayoutService>();
+
+var app = builder.Build();
+
+// ADDED 5.3: volume seeding only runs when you ask for it:  dotnet run -- --seed-volume
+// It never runs on normal startup. It applies migrations first, seeds, then stops (no web server).
+if (args.Contains("--seed-volume"))
+{
+    using var volumeScope = app.Services.CreateScope();
+    var volumeDb = volumeScope.ServiceProvider.GetRequiredService<RondiTrackDbContext>();
+    await volumeDb.Database.MigrateAsync();
+    await VolumeSeeder.RunAsync(volumeDb);
+    return;
+}
+
+// Put the demo data into Postgres (Development only, needs the migration applied first)
+if (app.Environment.IsDevelopment())
+{
+    using var scope = app.Services.CreateScope();
+    var db = scope.ServiceProvider.GetRequiredService<RondiTrackDbContext>();
+    await SeedData.EnsureSeededAsync(db);
+}
+
+app.UseExceptionHandler();
+
+if (app.Environment.IsDevelopment())
+{
+    app.MapOpenApi();
+    app.MapScalarApiReference();
+}
+
+app.UseHttpsRedirection();
+app.MapControllers();
+
+app.Run();
+
+public partial class Program;
+
+===== README.md =====
+# RondiTrack API (Week 4, Day 1)
+
+A .NET 10 Web API for tracking stokvels and their members, with in-memory data.
+
+## Controllers vs Minimal APIs
+I chose Controllers. The assignment asks for explicit attribute routing and a nested
+stokvel -> members route. Controllers keep each resource's routes together in one class,
+which stays readable as the API grows.
+
+## Rules enforced in code
+**User:** name required (max 100 chars); email required, valid format and normalised to
+lowercase. Emails are unique (409 on duplicates). A user who belongs to a stokvel cannot be
+deleted, because removing a member mid-rotation would break payouts.
+
+**Stokvel:** name required; contribution must be > 0 with at most 2 decimal places;
+frequency must be Weekly/Fortnightly/Monthly; capacity 2-50 (a rotation needs at least 2
+people). A member can't join twice, a full stokvel can't take more members, and capacity
+can't be lowered below the current member count.
+
+These live in the entity constructors and methods, so an invalid User or Stokvel cannot
+be created. Members is exposed read-only; the only way to change it is AddMember/RemoveMember.
+
+## Money
+ContributionAmount is `decimal`, not `double`. Binary floating point can't represent
+values like 0.1 exactly, which is unacceptable for money.
+
+## Status codes
+200 OK, 201 Created (with Location), 204 No Content, 400 invalid input,
+404 not found, 409 conflict, 422 request references a non-existent user.
+
+## Run it
+    dotnet run
+Open http://localhost:5134/scalar/v1 (port may vary - check your terminal output).
+Seeded IDs: users 10000000-0000-0000-0000-00000000000{1-6},
+stokvels 20000000-0000-0000-0000-00000000000{1-2}.
+
+## Assignment 4.2: DTOs, Service Layer & Idempotency
+
+### DTOs and mapping
+Every endpoint now sends and receives DTOs (in `Dtos/`), never the `User`/`Stokvel`/`Contribution`
+entities directly. `StokvelResponse` exposes `memberCount` and `isFull` instead of the internal
+member list, since that's what a caller actually needs.
+
+Mapping is done by hand in `Dtos/MappingExtensions.cs`, one `ToResponse()` extension method per
+entity. I kept manual mapping even setting the constraint aside: this project touches money, and
+an auto-mapping library matches fields by name/convention, which is exactly the over-posting risk
+the brief warns about â€” a typo'd or renamed field could silently stop mapping, or worse, a new
+internal field could get exposed without anyone noticing. A hand-written method makes every field
+that crosses the boundary an explicit, reviewable line of code.
+
+### Service layer
+Two services hold the real decisions:
+
+- `StokvelMembershipService` â€” adding/removing a member spans two repositories (Stokvel and User)
+  and needs to check both exist before touching either. That's more than validation; it's an
+  orchestration decision, so it moved out of the controller.
+- `ContributionService` â€” recording a contribution is RondiTrack's first money-moving operation.
+  It has to check the stokvel exists, the user exists, the user is actually a member, the same
+  cycle hasn't already been paid, and it owns the idempotency check. That's several decisions
+  spanning three repositories plus the idempotency store â€” clearly service-layer work, not a
+  controller if-statement.
+
+Everything else (basic CRUD) stayed in the controllers, since create/read/update/delete on a
+single entity is just HTTP translation plus the validation the entity already enforces on itself.
+
+### Idempotency design
+The client sends an `Idempotency-Key` header with each `POST /api/stokvels/{id}/contributions`
+request. The service:
+1. Computes a hash of the request (stokvel id + user id + cycle + amount).
+2. Looks up the key in `IIdempotencyStore` (in-memory, same pattern as the repositories).
+3. If the key exists with the *same* hash: returns the original response again, without touching
+   the data a second time (a safe replay).
+4. If the key exists with a *different* hash: rejects with 409 â€” reusing a key for a different
+   request is not the same as retrying, and silently accepting it would hide a real client bug.
+5. If the key is new: does the real work (all the existence/membership/duplicate-cycle checks),
+   records the contribution, and saves the response under that key for future replays.
+
+Tested in Scalar: the same key + same body sent twice returned the same contribution `id` both
+times (no duplicate recorded); the same key + a changed `amount` returned 409; a new key with the
+same `cycle` for the same user also returned 409, with a different message â€” the real
+"already paid for this cycle" rule, separate from the idempotency check.
+
+### 400 vs 422
+`POST /api/stokvels/{id}/contributions` uses both, for different reasons:
+- **400** â€” the request itself is malformed: the `Idempotency-Key` header is missing entirely.
+  Nothing about the data could be evaluated yet.
+- **422** â€” the request is well-formed JSON pointing at a real stokvel, but a reference inside
+  it doesn't resolve: the `userId` doesn't exist, or exists but isn't actually a member of that
+  stokvel. The request made sense structurally; its meaning just didn't hold up.
+
+### Status codes reviewed across the whole API
+All 4.1 endpoints now return RFC 9457 `application/problem+json` on every error path (via
+`Problem(...)` / the `DomainProblem`/`NotFoundProblem` helpers), not bare strings. `NotFound()`
+calls were replaced with `NotFoundProblem(...)` so a 404 body has the same shape as every other
+error.
+
+
+
+## Assignment 4.3: Validation & Centralized Error Handling
+
+### Exception hierarchy
+`DomainValidationException` (400), `DomainNotFoundException` (404), `DomainConflictException` (409),
+`DomainReferenceException` (422), plus FluentValidation's `ValidationException` (400) for malformed
+requests caught before the service layer runs.
+
+The idempotency-key conflict and a duplicate contribution both use `DomainConflictException` â€” I
+classified them as the same kind of failure, because both describe a request that is well-formed
+and valid on its own but clashes with something that already happened (a prior contribution, a
+prior use of the same key with different data).
+
+### Validation vs exceptions
+FluentValidation validators (in `Validators/`) only check shape: required fields, ranges, enum
+membership. They never touch a repository. Anything needing to check whether something else exists
+or already happened (duplicate email, missing stokvel, already-paid cycle, idempotency-key reuse)
+is a thrown domain exception, caught by the single `RondiExceptionHandler`.
+
+### Centralized handling
+Every controller action now throws instead of building its own response. `RondiExceptionHandler`
+(registered via `AddExceptionHandler`) maps every exception type to a status code, logs it with a
+correlation ID, and writes a single `application/problem+json` shape. No controller constructs a
+`ProblemDetails` by hand anymore.
+
+### ContributionCycle
+Plain CRUD from the controller, no service method â€” there's no cross-entity decision involved,
+just checking the parent stokvel exists before creating a cycle. `Contribution` now references a
+real `ContributionCycle.Id` instead of a placeholder cycle number.
+
+### Correlation ID
+Every error response includes a `correlationId` in its body that matches the structured log entry
+for that request, e.g.:
+
+### Negative-path tests
+`RondiTrack.Tests/ErrorHandlingTests.cs` covers a malformed request (400), a not-found resource
+(404), and a business-rule conflict (409) â€” all asserting both the status code and that the
+response content type is `application/problem+json`. All 3 pass.
+
+
+
+## Assignment 4.4: Documentation & Testing
+
+### Documentation
+
+Every endpoint across 4.1â€“4.3 now has an XML `<summary>` and `[ProducesResponseType]` attributes
+for every realistic response â€” success and every problem+json failure it can return (400/404/409/422
+as applicable) â€” so Scalar shows the full contract, not just the inferred happy path.
+
+### Test suite
+
+* `UnitTests.cs` â€” no HTTP, no DI container. Tests `Stokvel.AddMember` directly (full stokvel,
+  duplicate member, success) and `ContributionService` built by hand from its in-memory repositories
+  (duplicate-cycle rule, idempotent replay, idempotency-key conflict on a different payload).
+* `IntegrationTests.cs` â€” through `WebApplicationFactory`, exercising the real pipeline (validation â†’
+  service â†’ exception handler): happy paths for Users and Stokvels, a validation failure, a not-found,
+  the membership business rule (409 full, 422 nonexistent user), and the full idempotency guarantee
+  (same key/same body replay, same key/different body 409, new key/same cycle 409, missing key 400).
+* `ErrorHandlingTests.cs` (from 4.3) â€” malformed request, not-found, duplicate-email conflict.
+
+### Edge cases
+
+1. **Empty collection** â€” `GET /members` on a stokvel with no members yet. Found by asking what the
+   very first request against a brand-new stokvel looks like, before anyone has joined.
+2. **Boundary value** â€” `MaxMembers = 2`, the validator's inclusive minimum. Found by re-reading
+   `InclusiveBetween(2, 50)` and checking the edge itself is accepted, not just values inside it.
+3. **Cross-resource reference** â€” a contribution request whose `CycleId` is valid but belongs to a
+   *different* stokvel than the one in the URL. Found by noticing the service only checked the cycle
+   existed, not that it belonged to the stokvel being paid into.
+
+### Deliberately broken rule
+
+Commented out the `IsFull` check in `Stokvel.AddMember`, reran `dotnet test`:
+`AddMember_Throws_When_Stokvel_Is_Full` failed as expected, confirming the suite would catch a real
+regression there. Reverted immediately.
+
+### Test run
+
+```text
+Test summary: total: 22, failed: 0, succeeded: 22, skipped: 0, duration: 8.4s
+Build succeeded with 4 warning(s) in 18.0s
+```
+
+### Definition of Done
+
+| Endpoint                    | Documented | Validated | Unit-tested                                 | Integration-tested                 | Status codes reviewed |
+| --------------------------- | ---------- | --------- | ------------------------------------------- | ---------------------------------- | --------------------- |
+| GET /api/users              | Yes        | N/A       | No                                          | No                                 | Yes                   |
+| GET /api/users/{id}         | Yes        | N/A       | No                                          | Yes (404)                          | Yes                   |
+| POST /api/users             | Yes        | Yes       | No                                          | Yes (201, 400, 409)                | Yes                   |
+| PUT /api/users/{id}         | Yes        | Yes       | No                                          | No                                 | Yes                   |
+| DELETE /api/users/{id}      | Yes        | N/A       | No                                          | No                                 | Yes                   |
+| GET /api/stokvels           | Yes        | N/A       | No                                          | No                                 | Yes                   |
+| GET /api/stokvels/{id}      | Yes        | N/A       | No                                          | Yes (404)                          | Yes                   |
+| POST /api/stokvels          | Yes        | Yes       | No                                          | Yes (201, 400, boundary)           | Yes                   |
+| PUT /api/stokvels/{id}      | Yes        | Yes       | No                                          | No                                 | Yes                   |
+| DELETE /api/stokvels/{id}   | Yes        | N/A       | No                                          | No                                 | Yes                   |
+| GET .../members             | Yes        | N/A       | No                                          | Yes (empty-list edge case)         | Yes                   |
+| GET .../members/{userId}    | Yes        | N/A       | No                                          | No                                 | Yes                   |
+| POST .../members            | Yes        | Yes       | Yes (full, duplicate, success)              | Yes (409, 422)                     | Yes                   |
+| DELETE .../members/{userId} | Yes        | N/A       | No                                          | No                                 | Yes                   |
+| POST .../contributions      | Yes        | Yes       | Yes (duplicate cycle, replay, key conflict) | Yes (400, 409Ã—2, 422, idempotency) | Yes                   |
+| GET .../cycles              | Yes        | N/A       | No                                          | No                                 | Yes                   |
+| GET .../cycles/{id}         | Yes        | N/A       | No                                          | No                                 | Yes                   |
+| POST .../cycles             | Yes        | Yes       | No                                          | Used as test seed helper           | Yes                   |
+| PUT .../cycles/{id}         | Yes        | Yes       | No                                          | No                                 | Yes                   |
+| DELETE .../cycles/{id}      | Yes        | N/A       | No                                          | No                                 | Yes                   |
+
+### Known gap
+
+Plain CRUD reads/updates/deletes on Users, Stokvels, and ContributionCycles (the "No" rows above)
+have no dedicated integration test. Deliberate, time-boxed choice: they carry no business logic
+beyond what the entity constructors and FluentValidation already unit-guarantee, so test effort went
+into the endpoints that actually decide something â€” membership and contributions. Closing this gap
+is the first thing to do before Week 5 persistence work touches these same code paths.
+
+
+
+## Assignment 5.1 â€“ EF Core & Database Foundations
+
+### 1. PostgreSQL setup
+I first installed Docker Desktop (with WSL 2), but its engine returned a 500 error and was very slow to start on my machine, so I switched to a **local PostgreSQL 18 install**. It has fewer moving parts, needs no WSL, and runs as a Windows service that starts again by itself after a reboot or power cut.
+
+How a teammate with a clean machine reproduces it:
+1. Download and run the PostgreSQL installer for Windows from postgresql.org. Keep the defaults (port 5432), set a password for the `postgres` user, and untick Stack Builder (cancel it if it opens).
+2. Open **SQL Shell (psql)**, log in as `postgres`, and run:
+```sql
+   CREATE USER rondi_user WITH PASSWORD '<choose-a-password>';
+   CREATE DATABASE ronditrack OWNER rondi_user;
+```
+3. Prove connectivity before running the API: open SQL Shell, connect to database `ronditrack` as `rondi_user`, and run `\conninfo`. I confirmed: database `ronditrack`, client user `rondi_user`, host `localhost`, port 5432, password used, superuser **off**. After migrating, `\dt` lists the six tables plus `__EFMigrationsHistory`. ![Connection info for rondi_user on ronditrack](docs/conninfo.png)
+
+![Tables created by the migration](docs/tables.png)
+4. Set the connection string with User Secrets (section 4) and run `dotnet ef database update`.
+
+### 2. The property that did not map
+`Stokvel.Members` is an `IReadOnlyCollection<User>` that wraps a private `_members` list and has no setter. EF Core cannot fill it, and treating it as a navigation would make EF guess a one-to-many link (a stray `StokvelId` column on `Users`). That would be wrong, because a user can be in several stokvels, and it would bypass the `AddMember` rules in the domain.
+**Decision:** ignore it (`e.Ignore(s => s.Members)`) and persist membership through a new `StokvelMember` join entity, which also holds `RotationPosition`. The calculated properties `PayoutPerCycle` and `IsFull` are ignored too, since storing them would let them go stale. The generated `Users` table has no stray column.
+Second finding: every entity had get-only properties (e.g. `public Guid Id { get; }`). I changed these to `private set` and added a private parameterless constructor for EF. Public constructors and validation are unchanged, so the domain rules are unchanged.
+
+### 3. Migration review
+I read every `CreateTable` in `InitialCreate` before applying it. I checked: (a) six tables exist; (b) `Users` has only `Id`, `FullName`, `Email`, `CreatedAtUtc`; (c) money columns are `numeric(18,2)`; (d) `Frequency` and `Status` are stored as text, so reordering an enum can never silently change data; (e) there are deliberately no foreign keys, because the Stokvel/User/Cycle repositories are still in-memory and an FK would make every contribution insert fail (superseded by Assignment 5.2, where those repositories moved to EF Core and the foreign keys were added); (f) unique indexes: one payout per cycle, and unique `(StokvelId, UserId)` and `(StokvelId, RotationPosition)` on members.
+**Something I noticed:** `Users.Email` has no unique index. The in-memory repository enforces unique emails, but the database would not. I must add that index before swapping `UserRepository`.
+**Rename risk:** the migration generator cannot tell a rename from a drop-and-add, so renaming a property such as `Contributions.Amount` or `StokvelMembers.RotationPosition` would produce `DropColumn` + `AddColumn` and delete that column's data. The fix is to edit the migration to use `RenameColumn`. This first migration only creates tables, and its `Down()` only drops tables it created.
+
+### 4. Secret management
+The connection string lives in **.NET User Secrets** (stored in my Windows user profile, outside the repo). `appsettings.json` only holds an empty placeholder. I verified with `git grep -i "<password>"` that nothing git tracks contains it.
+A teammate runs this in the API project folder (their own values):
+```powershell
+dotnet user-secrets init
+dotnet user-secrets set "ConnectionStrings:RondiTrack" "Host=localhost;Port=5432;Database=ronditrack;Username=rondi_user;Password=<their-password>;Maximum Pool Size=20"
+```
+If the secret is missing, the app fails at startup with a clear message.
+
+### 5. Retry and pooling
+`EnableRetryOnFailure(maxRetryCount: 4, maxRetryDelay: 10 seconds)`. The delay grows between attempts, so a short database restart or network blip gets about 15â€“20 seconds to recover, but a user is never left waiting for minutes. **Retried:** transient failures such as a dropped connection or a server that is still starting up (PostgreSQL error 57P03). **Deliberately not retried:** a unique-constraint violation (23505) or a wrong password (28P01), because retrying gives the same result and would hide a real bug. Npgsql pooling is on by default; I set `Maximum Pool Size=20`, which is plenty for this project without exhausting PostgreSQL connections.
+
+### 6. Repository swapped
+I swapped **`ContributionRepository`** because it backs the duplicate-contribution rule (`ExistsAsync`) that my Assignment 4.4 tests exercise hardest. `EfContributionRepository` implements the existing `IContributionRepository` unchanged. `StokvelsController`, `ContributionService` and the DTOs did not change, and the registration moved from Singleton to Scoped.
+What did change, honestly: the entities (private setters and private constructors for EF), a new `Status` on `ContributionCycle` (Payout needs it), `Program.cs` registrations, and the test project's EF Core package versions (see section 7).
+**Why Singleton becomes Scoped:** the in-memory repositories were Singletons because they hold the data themselves and must live as long as the app. A `DbContext` is the opposite: it is not thread-safe, so two simultaneous requests sharing one instance would crash with "a second operation was started on this context". It also holds a change tracker that would grow forever, serve stale data, and leak one request's half-finished changes into another user's request. Scoped gives one `DbContext` per request, disposed at the end, which returns its connection to the pool.
+
+### 7. Test results (real PostgreSQL)
+- **Before the swap:** 22 total, 22 passed (`before-swap.txt`).
+- **After the swap:** 24 total, 24 passed (`after-swap.txt`): the same 22 plus 2 new payout tests.
+- **Proof it used my real database:** the EF Core log lines in `after-swap.txt` show `SELECT EXISTS ... FROM "Contributions"` and `INSERT INTO "Contributions"` against PostgreSQL. This is a new dependency (PostgreSQL must be running to run the suite); Testcontainers arrives on Day 4.
+- The `fail:` lines in the output are my exception handler logging the expected 404/409/422/400 responses that the tests provoke on purpose; they are not test failures.
+
+What the swap exposed:
+1. The first after-swap run did not compile: `CS1705`, EF Core 10.0.12 (pulled in by the Design package) versus 10.0.4 in the test project. I pinned `Microsoft.EntityFrameworkCore` and `.Relational` to 10.0.12 in the test project.
+2. The integration tests now write real rows that stay in PostgreSQL between runs. Nothing collides because every test uses fresh GUIDs, but the table grows. Testcontainers will fix this on Day 4.
+
+### 8. Payout rule
+Each `StokvelMember` has a `RotationPosition`. The next recipient is the member of that stokvel with the **lowest rotation position who has no payout yet**. The amount is the **sum of the cycle's contributions**; a cycle with no contributions is rejected. A cycle moves from `Open` to `PaidOut`, and a unique index on `Payouts.CycleId` means a cycle can only be paid once. Endpoint: `POST /api/stokvels/{stokvelId}/cycles/{cycleId}/payouts`. I kept it minimal on purpose: no scheduling, notifications or partial payouts.
+
+### 9. The transaction and rollback test
+`PayoutService.ProcessNextPayoutAsync` wraps two writes (insert the `Payout`, then set the cycle to `PaidOut`) in an explicit `IDbContextTransaction`, inside `CreateExecutionStrategy()` (required when retry-on-failure is enabled). A test-only `IPayoutFaultHook` throws between the two writes. The test `ProcessNextPayout_WhenItFailsAfterThePayoutInsert_LeavesNothingBehind` then re-queries with a **brand new DbContext** and asserts 0 payouts for the cycle and the cycle still `Open`. **Result: passed.** A second test checks the happy path (first member in rotation is paid 200, cycle becomes `PaidOut`): passed.
+
+### 10. Definition of Done (extended)
+Extended in Assignment 5.2 with two new columns (relationship modeled as real navigation, and N+1 measured and fixed). The "Persisted via EF Core" column now reflects the state after 5.2, when User, Stokvel, StokvelMember and ContributionCycle moved to EF Core.
+
+| Entity | Persisted via EF Core | Explicit transaction tested | Relationship modeled as real navigation (yes/no/N-A) | N+1 measured and fixed (yes/no/N-A) |
+|---|---|---|---|---|
+| User | yes | N/A | yes | N-A |
+| Stokvel | yes | N/A | yes | N-A |
+| StokvelMember | yes | N/A | yes | N-A |
+| ContributionCycle | yes | yes | yes | N-A |
+| Contribution | yes | N/A | yes | yes (33 queries down to 2) |
+| Payout | yes | yes | yes (composite FK, no navigation property) | N-A |
+
+### 11. Gaps I chose not to close yet
+*Written during Assignment 5.1. Partly superseded by Assignment 5.2: the User, Stokvel and ContributionCycle repositories and the foreign keys were added there. See the 5.2 gaps at the end of this file for the current list.*
+
+- User, Stokvel, ContributionCycle and idempotency repositories stay in-memory by decision, not oversight.
+- No foreign keys yet (see section 3). Add them when those repositories are swapped.
+- The payout endpoint works on persisted rows, but cycles and memberships created through the API are still in-memory, so today it can only be exercised with data in PostgreSQL.
+- No unique index on `Users.Email`, and "one contribution per user per cycle" is enforced in code only.
+- Build warning `NU1903` (Microsoft.OpenApi 2.0.0 known vulnerability) existed before this assignment; `MSB3277` EF Core version-conflict warnings remain in the test project.
+- Tests share my local PostgreSQL database until Testcontainers on Day 4.
+
+
+
+
+
+# Assignment 5.2: Relationships and Query Behavior
+
+## Why StokvelMember has a composite key
+StokvelMember has its own data (Role, RotationPosition, JoinedAtUtc), so it cannot be a hidden many-to-many join table. Its natural key is the pair (UserId, StokvelId), because that pair already identifies a membership and a person cannot belong to the same stokvel twice. The composite primary key enforces that rule in the database for free. A surrogate Guid Id would have needed an extra unique index to do the same job, and would be a column nobody asked for. The old unique index on (StokvelId, UserId) was removed because the primary key now covers it.
+
+## How Contribution and Payout reference a membership
+Contribution and Payout reference a membership through a composite foreign key. Contribution uses (UserId, StokvelId) and Payout uses (RecipientUserId, StokvelId); both match StokvelMember's composite primary key, so the database guarantees every contribution and payout belongs to a real member of that stokvel. I did not keep a plain UserId and check membership in the service layer: that guarantee would live only in code, and any path that forgets the check could store a contribution for a non-member. I did not add a hidden surrogate Id to StokvelMember: that would undo the reason for a natural key and bring back the duplicate-membership risk.
+
+This forced a change to Payout: it previously stored RecipientMemberId, a StokvelMember.Id that no longer exists. It now stores RecipientUserId, which together with the StokvelId it already had identifies the recipient membership. PayoutService and PayoutResponse changed to match; the payout rule itself (next unpaid member by RotationPosition) is unchanged.
+
+## What replaced generic access for StokvelMember
+RondiTrack never had a generic IRepository<T>: each entity has its own interface. StokvelMember had no repository at all, and PayoutService read it straight from the DbContext. With a composite key a single-Guid GetById would be meaningless for it, so I added a dedicated IStokvelMemberRepository whose lookup takes both ids, GetAsync(userId, stokvelId), plus GetByStokvelAsync, AddAsync and RemoveAsync. GetAsync takes a forUpdate flag (default false) so pure reads are not tracked while a load-to-modify stays tracked. PayoutService now reads members through this repository.
+
+Making the foreign keys real also needed real rows on both sides, but Users, Stokvels and cycles were still in-memory repositories. I therefore moved IUserRepository, IStokvelRepository and IContributionCycleRepository to EF Core as well. Stokvel keeps its in-memory member list for its business rules (no duplicates, capacity); EfStokvelRepository fills it from the StokvelMember rows when loading and turns it back into rows on UpdateAsync. Demo data is seeded into Postgres once, in Development only.
+
+## Reading an ALTER migration
+This migration alters existing tables rather than creating them, so I checked for things a CREATE can't do. (1) EF printed "An operation was scaffolded that may result in the loss of data"; that warning comes from DropColumn "Id" on StokvelMembers, which is the key change. (2) StokvelMembers does DropPrimaryKey, DropIndex (the old unique index on StokvelId and UserId), DropColumn Id and AddPrimaryKey on (UserId, StokvelId), with the columns in the same order the foreign keys use. (3) For Payouts, EF scaffolded a RenameColumn from RecipientMemberId to RecipientUserId instead of a drop and add. That is more dangerous than a drop, because a rename silently keeps the old values, and those were StokvelMember.Id numbers that would now be read as UserIds, with no error to warn me. My table was empty so nothing was harmed, but with real data I would replace the rename with a script that maps each old member Id to its UserId before the old column goes. (4) The new Role column was scaffolded with a default of an empty string, which cannot be read back as a role, so I changed the default to "Member". (5) The five new foreign keys would fail on existing rows that point at users, stokvels or members that do not exist; my tables were empty. (6) No existing table is dropped and recreated, and each foreign key's onDelete (Cascade or Restrict) matches the DbContext. (7) The Down method re-adds Id with an all-zero default, which would fail on a table with several rows, so it can only roll back safely on an empty table. Because my development data was only test rows, I applied it on the empty database.
+
+## Second relationship wired
+I wired Stokvel to ContributionCycle (a stokvel has many cycles; each cycle belongs to one stokvel). A cycle cannot exist without its stokvel, and the cycles endpoints are already routed under /stokvels/{id}/cycles, so the navigation matches how the API is used. The alternative was ContributionCycle to Contribution. It was equally fair, but I left Contribution.CycleId as a bare Guid, an honest "not yet", because Contribution already received a real relationship today (to StokvelMember).
+
+## N+1 measurement
+The naive endpoint (GET /api/stokvels/{stokvelId}/cycles/{cycleId}/contributions?strategy=naive) loads the Contribution rows with no eager loading, then for each row explicitly loads its Member and then that Member's User (explicit loading in a loop, because lazy loading is not allowed in this project). With EF Core's SQL command logging turned on and 6 contributions in the cycle, the log showed **33 SQL commands** for the single request. That count includes the cycle existence check and the query for the rows, and it grows with every extra contribution because each row triggers its own extra queries. After the Include fix the same request fired **2** commands, and after the projection fix also **2** (the cycle existence check plus one query for the data).
+
+## Which fix shipped, and why
+I shipped the projection. The Include version fetched whole entities: all 6 Contribution columns, all 5 StokvelMember columns and all 4 User columns, 15 in total, then materialised an entity graph and ignored most of it. The projection fetched only the 8 columns the response returns (Id, UserId, FullName, Email, Role, RotationPosition, Amount, RecordedAtUtc), 7 fewer, and builds no entity graph at all. The answer does not change with fifty members instead of five; it gets stronger. Both versions are one query, but Include's wasted width grows with every row, while the projection stays proportional to what the response actually needs. The naive and Include versions stay in the code only for comparison, reachable in Development through ?strategy=, and ignored in any other environment.
+
+## Loading strategy decisions
+Contributions-by-cycle endpoint: the shipped version is a projection (no entity graph at all). Second read path, GET /api/stokvels: EfStokvelRepository.GetAllAsync uses eager loading (Include of the member's User), 2 queries in total however many stokvels exist. Third, GET /api/stokvels/{id} uses explicit loading: it loads the stokvel and then runs a second, deliberate query for its members, because a single stokvel is cheap and the member list is hydrated into the aggregate afterwards.
+
+Lazy loading appears nowhere, and no lazy-loading proxy package is installed. I left it out because it hides a database round trip behind an ordinary property access, which is exactly how the N+1 problem stays invisible until it hurts. It also cannot be awaited, so it blocks a thread on every access in an async API, and it fails once the DbContext is disposed. I would rather see every query I am paying for in the code.
+
+## AsNoTracking audit
+Every GET was audited: users (list, by id), stokvels (list, by id, members list, single member), cycles (list, by id), contributions-by-cycle. All use AsNoTracking. The risky case was GetByIdAsync, which is shared by GET and by PUT flows that load an entity in order to change it. A blanket AsNoTracking would silently break a PUT that relies on change tracking. I avoided that by making every write attach its object explicitly (db.X.Update(entity)), and I added Update_User_Persists_After_Untracked_Read to prove a PUT still persists. Two places needed deliberate handling: IStokvelMemberRepository.GetAsync takes forUpdate (default false), and PayoutService loads the cycle tracked on purpose because it changes its status and saves.
+
+## Test suite before and after
+Before today's changes: 24/24 passing. After: 25/25 passing (24 existing plus the new Update_User_Persists_After_Untracked_Read). What broke and what it exposed: PayoutTransactionTest referenced StokvelMember.Id directly (first.Id) and constructed PayoutService without a member repository, so it stopped compiling when the key changed (three compile errors: the missing Id and two PayoutService constructor calls). Once it compiled, its seed data would have failed against the new foreign keys, because it inserted memberships and a cycle for a stokvel and users that were never saved. That showed my old test was proving a payout works against a schema with no relationships. I fixed it by seeding parents first (users, stokvel), then members, cycle and contributions. ErrorHandlingTests depended on demo users that used to live in memory, so the Development seed now writes them to Postgres. The Contribution unit tests (in-memory repositories) and StokvelMembershipTests (domain-only) never referenced StokvelMember.Id or the changed repositories, and passed unchanged.
+
+## Definition of Done (extended)
+The merged table, with these two columns added to the Assignment 5.1 table, is in Assignment 5.1, section 10. The table below shows the same two columns by relationship.
+
+| Relationship | Modeled as real navigation (yes/no/N-A) | N+1 measured and fixed (yes/no/N-A) |
+|---|---|---|
+| User and Stokvel via StokvelMember | yes | N-A |
+| Stokvel to ContributionCycle | yes | N-A |
+| Contribution to StokvelMember | yes | yes (contributions-by-cycle: 33 queries down to 2) |
+| Payout to StokvelMember (recipient) | yes (composite FK, no navigation property) | N-A |
+| Contribution to ContributionCycle (CycleId) | no (bare Guid, not yet) | N-A |
+| Payout to ContributionCycle (CycleId) | no (bare Guid, not yet) | N-A |
+
+## Gaps I chose not to close yet
+(1) Stokvel keeps both an in-memory Members list (Users) and a mapped Memberships list; they will be merged in a later cleanup. (2) Deleting a stokvel or removing a member who still has contributions or payouts would be rejected by the database (the Restrict foreign keys) and currently surfaces as a 500 instead of a friendly 409; I did not test this. (3) Contribution.CycleId and Payout.CycleId are still bare Guids. (4) Role has no endpoint to change it (it defaults to Member); that would be a new feature. (5) The idempotency store is still in memory. (6) Rotation position is assigned automatically as the next number when a member is added.
+
+
+
+# Assignment 5.3: Optimizations, Concurrency & Database Defense
+
+## 1. In-memory filtering audit
+Found with: `Select-String -Path .\**\*.cs -Pattern "ToListAsync|ToList\(\)|IEnumerable<|AsEnumerable"` (Migrations, bin and obj excluded).
+
+| File / method | What it does | Decision | Why |
+|---|---|---|---|
+| `ContributionQueries.GetForCycleNaiveAsync` | Filter and sort run in SQL, `ToListAsync`, then a loop loads related rows | Left, no longer behind the endpoint | It is the deliberate N+1 demo from 5.2. The endpoint now uses `ContributionPagingService`. |
+| `ContributionQueries.GetForCycleIncludeAsync` / `ProjectedAsync` | Filter and sort in SQL; `Select(ToDto)` after `ToListAsync` is mapping only | Left | No filtering after materialization. |
+| `EfStokvelRepository.GetAllAsync` | `ToListAsync` of all memberships, then `memberships.Where(m => m.StokvelId == s.Id)` per stokvel in C# | **Left**, stated as "not yet" | Real in-memory filtering. `GET /api/stokvels` is not paged today and stays exactly as it was. It is the first thing to fix when that endpoint is paged. |
+| `EfStokvelRepository.UpdateAsync` | Existing memberships loaded (filtered in SQL), then `.Where` / `.Max` in C# to decide which to add or remove | Left | Bounded: one stokvel, at most 50 members. It compares the in-memory list with the database list, so it cannot be a single query. |
+| `PayoutService.ProcessNextPayoutAsync` | `paidUserIds` list, then `FirstOrDefault(m => !paidUserIds.Contains(...))` in C# | Left | Bounded by the member count of one stokvel (max 50), used once per payout. |
+| `EfUserRepository.GetAllAsync`, `EfContributionCycleRepository.GetByStokvelAsync`, `EfStokvelMemberRepository.GetByStokvelAsync`, `EfContributionRepository.GetByStokvelAsync` | Filter and sort in SQL, then `ToListAsync`. Nothing after. | Left | Correct. These list endpoints are not paged yet (see Gaps). |
+| `InMemory*Repository` classes | `.Where/.OrderBy/.ToList` over dictionaries | Left | In-memory test doubles for unit tests. No database involved. |
+| `StokvelsController.GetMembers` (old) | Loaded the whole stokvel and every member, then mapped | **Moved into the query** | Replaced by `MemberPagingService`: WHERE, ORDER BY and LIMIT in SQL. |
+| `ContributionCyclesController.GetContributions` (old) | Returned everything for the cycle in one list | **Moved into the query** | Replaced by `ContributionPagingService`. |
+
+**SQL evidence from the EF Core command log** (contributions endpoint, `pageSize=25`, parameters `@cycleId='2fc7b21f-fe7c-4618-bdbd-aa244b5f3534'`, `@p='26'`):
+```sql
+SELECT c0."Id", c0."UserId", u."FullName", u."Email", s."Role", s."RotationPosition", c0."Amount", c0."RecordedAtUtc"
+FROM (
+    SELECT c."Id", c."Amount", c."RecordedAtUtc", c."StokvelId", c."UserId"
+    FROM "Contributions" AS c
+    WHERE c."CycleId" = @cycleId
+    ORDER BY c."RecordedAtUtc", c."Id"
+    LIMIT @p
+) AS c0
+INNER JOIN "StokvelMembers" AS s ON c0."UserId" = s."UserId" AND c0."StokvelId" = s."StokvelId"
+INNER JOIN "Users" AS u ON s."UserId" = u."Id"
+ORDER BY c0."RecordedAtUtc", c0."Id"
+```
+`WHERE`, `ORDER BY` and `LIMIT` are all in the SQL text. EF Core even applies them to `Contributions` first and joins afterwards.
+
+**SQL evidence for the paged members endpoint** (`GET /api/stokvels/{id}/members?pageSize=10`):
+```sql
+<<paste the Executed DbCommand entry that has FROM "StokvelMembers" and LIMIT from your console>>
+```
+
+## 2. Pagination contract (modelled on AIP-158)
+Applied to `GET /api/stokvels/{id}/cycles/{cycleId}/contributions` and `GET /api/stokvels/{id}/members`.
+
+- **Page size:** optional `pageSize`. Default **25**, maximum **100**. A value above 100 is reduced to 100 (not rejected). Missing or `0` means the default. A negative value returns **400**.
+- **Page token:** `pageToken` is an opaque base64url string. Clients must not parse or build it.
+- **Next page:** `nextPageToken` is `""` exactly when there are no more results. The server fetches `pageSize + 1` rows to know this, so there is never an empty last page.
+- **Token reuse:** the token carries a fingerprint of the sort and filters. Using it with a different sort or filter returns **400** ("start again without a pageToken"). A garbled token also returns **400**.
+- **Total count: not returned.** `COUNT(*)` has to visit every matching row, so it gets slower as the table grows, and it is already out of date when a new contribution arrives. Clients only need "is there more?", which `nextPageToken` answers.
+- **Offset vs keyset: keyset**, behind the opaque token, on `(sortValue, Id)`.
+  - With offset paging, if a new contribution is inserted on page one while a client is on page two, every row shifts down by one and the client sees a row twice. A deletion makes the client skip a row. With keyset, the token says "continue after this exact row", so inserts before it do not move the client's position.
+  - For a cycle with 5 contributions both approaches behave the same and nobody would notice. For a stokvel with 10 000 contributions, offset also gets slower the deeper you go (it must walk past every skipped row), while keyset jumps straight to the right place using the index. Because the token is opaque, the implementation can change later without breaking clients.
+
+## 3. Sorting and filtering allow-list
+| Endpoint | Sortable | Filterable |
+|---|---|---|
+| Contributions of a cycle | `date`, `-date`, `amount`, `-amount` (default `date`) | `userId`, `dateFrom`, `dateTo` (both inclusive, UTC) |
+| Stokvel members | fixed: rotation position | none |
+
+- Every sort ends with `Id` as a unique tiebreaker, so rows with the same date or amount never swap places between requests. The seeded data has many rows with the same timestamp on purpose.
+- An unknown sort value, `dateFrom` after `dateTo`, or a bad token returns **400** as a problem response (same shape as Week 4). A malformed `userId` or date is rejected by model binding, also as a 400 problem response.
+- **Refused: sorting (and filtering) by member name.** It needs a join to Users, so it cannot use the contributions index, and it would need its own keyset on `(FullName, Id)` with an index spanning two tables.
+- Honest note: `amount` sorting works and is deterministic, but it is not covered by the new index. I did not add a second index without a query plan showing it is needed.
+
+## 4. Query plan evidence
+- **Seeded volume:** 3 stokvels x 100 members x 60 cycles = **18 000 contributions** (100 per cycle), plus 300 users and 180 cycles. Command: `dotnet run -- --seed-volume` (`Data/VolumeSeeder.cs`). It never runs on normal startup. It was run against a separate database, `ronditrack_volume`.
+- **Query measured:** the SQL from section 1 with `@cycleId = '2fc7b21f-fe7c-4618-bdbd-aa244b5f3534'` and `LIMIT 26`, after `ANALYZE "Contributions"`.
+
+**Before the new index** (existing indexes only)
+```
+Sort  (cost=208.61..208.63 rows=9 width=98) (actual time=1.645..1.650 rows=26.00 loops=1)
+  Sort Key: c0."RecordedAtUtc", c0."Id"
+  Sort Method: quicksort  Memory: 28kB
+  Buffers: shared hit=138
+  ->  Nested Loop  (cost=195.72..208.47 rows=9 width=98) (actual time=1.145..1.332 rows=26.00 loops=1)
+        Join Filter: (u."Id" = c0."UserId")
+        Buffers: shared hit=138
+        ->  Hash Join  (cost=195.45..204.79 rows=9 width=72) (actual time=1.064..1.187 rows=26.00 loops=1)
+              Hash Cond: ((s."UserId" = c0."UserId") AND (s."StokvelId" = c0."StokvelId"))
+              Buffers: shared hit=60
+              ->  Seq Scan on "StokvelMembers" s  (cost=0.00..7.00 rows=300 width=43) (actual time=0.081..0.159 rows=300.00 loops=1)
+                    Buffers: shared hit=4
+              ->  Hash  (cost=195.06..195.06 rows=26 width=61) (actual time=0.963..0.964 rows=26.00 loops=1)
+                    Buckets: 1024  Batches: 1  Memory Usage: 11kB
+                    Buffers: shared hit=56
+                    ->  Subquery Scan on c0  (cost=194.73..195.06 rows=26 width=61) (actual time=0.932..0.942 rows=26.00 loops=1)
+                          Buffers: shared hit=56
+                          ->  Limit  (cost=194.73..194.80 rows=26 width=61) (actual time=0.930..0.935 rows=26.00 loops=1)
+                                Buffers: shared hit=56
+                                ->  Sort  (cost=194.73..194.98 rows=100 width=61) (actual time=0.925..0.927 rows=26.00 loops=1)
+                                      Sort Key: c."RecordedAtUtc", c."Id"
+                                      Sort Method: top-N heapsort  Memory: 30kB
+                                      Buffers: shared hit=56
+                                      ->  Bitmap Heap Scan on "Contributions" c  (cost=5.06..191.88 rows=100 width=61) (actual time=0.487..0.582 rows=100.00 loops=1)
+                                            Recheck Cond: ("CycleId" = '2fc7b21f-fe7c-4618-bdbd-aa244b5f3534'::uuid)
+                                            Heap Blocks: exact=54
+                                            Buffers: shared hit=56
+                                            ->  Bitmap Index Scan on "IX_Contributions_CycleId_UserId"  (cost=0.00..5.04 rows=100 width=0) (actual time=0.446..0.446 rows=100.00 loops=1)
+                                                  Index Cond: ("CycleId" = '2fc7b21f-fe7c-4618-bdbd-aa244b5f3534'::uuid)
+                                                  Index Searches: 1
+                                                  Buffers: shared hit=2
+        ->  Index Scan using "PK_Users" on "Users" u  (cost=0.27..0.40 rows=1 width=58) (actual time=0.005..0.005 rows=1.00 loops=26)
+              Index Cond: ("Id" = s."UserId")
+              Index Searches: 26
+              Buffers: shared hit=78
+Planning:
+  Buffers: shared hit=171
+Planning Time: 15.574 ms
+Execution Time: 3.148 ms
+```
+- Nodes: Limit -> Sort (top-N heapsort) -> Bitmap Heap Scan on Contributions <- Bitmap Index Scan on `IX_Contributions_CycleId_UserId`, then Hash Join to StokvelMembers, Nested Loop to Users (PK), and a final Sort of the 26 joined rows.
+- Execution time: **3.148 ms**. Estimated rows 100 vs actual 100 on the Contributions scan. Rows Removed by Filter: not present. Buffers: shared hit=138 (56 for the Contributions part, 54 heap blocks).
+- Reading: not a Seq Scan, because the existing unique index `(CycleId, UserId)` starts with `CycleId`. It finds the cycle's 100 rows but cannot return them in date order, so Postgres fetches all 100 rows from 54 heap blocks, sorts them, and keeps 26.
+
+**After `IX_Contributions_CycleId_RecordedAtUtc_Id`**
+```
+Sort  (cost=101.67..101.69 rows=9 width=98) (actual time=0.291..0.294 rows=26.00 loops=1)
+  Sort Key: c0."RecordedAtUtc", c0."Id"
+  Sort Method: quicksort  Memory: 28kB
+  Buffers: shared hit=107
+  ->  Nested Loop  (cost=88.78..101.53 rows=9 width=98) (actual time=0.123..0.270 rows=26.00 loops=1)
+        Join Filter: (u."Id" = c0."UserId")
+        Buffers: shared hit=107
+        ->  Hash Join  (cost=88.51..97.85 rows=9 width=72) (actual time=0.115..0.202 rows=26.00 loops=1)
+              Hash Cond: ((s."UserId" = c0."UserId") AND (s."StokvelId" = c0."StokvelId"))
+              Buffers: shared hit=29
+              ->  Seq Scan on "StokvelMembers" s  (cost=0.00..7.00 rows=300 width=43) (actual time=0.030..0.074 rows=300.00 loops=1)
+                    Buffers: shared hit=4
+              ->  Hash  (cost=88.12..88.12 rows=26 width=61) (actual time=0.065..0.065 rows=26.00 loops=1)
+                    Buckets: 1024  Batches: 1  Memory Usage: 11kB
+                    Buffers: shared hit=25
+                    ->  Subquery Scan on c0  (cost=0.41..88.12 rows=26 width=61) (actual time=0.020..0.054 rows=26.00 loops=1)
+                          Buffers: shared hit=25
+                          ->  Limit  (cost=0.41..87.86 rows=26 width=61) (actual time=0.020..0.049 rows=26.00 loops=1)
+                                Buffers: shared hit=25
+                                ->  Index Scan using "IX_Contributions_CycleId_RecordedAtUtc_Id" on "Contributions" c  (cost=0.41..336.74 rows=100 width=61) (actual time=0.019..0.046 rows=26.00 loops=1)
+                                      Index Cond: ("CycleId" = '2fc7b21f-fe7c-4618-bdbd-aa244b5f3534'::uuid)
+                                      Index Searches: 1
+                                      Buffers: shared hit=25
+        ->  Index Scan using "PK_Users" on "Users" u  (cost=0.27..0.40 rows=1 width=58) (actual time=0.002..0.002 rows=1.00 loops=26)
+              Index Cond: ("Id" = s."UserId")
+              Index Searches: 26
+              Buffers: shared hit=78
+Planning:
+  Buffers: shared hit=24
+Planning Time: 0.873 ms
+Execution Time: 0.346 ms
+```
+- Nodes: Limit -> Index Scan using `IX_Contributions_CycleId_RecordedAtUtc_Id` on Contributions, then Hash Join, Nested Loop to Users (PK), and a final Sort of the 26 joined rows. The inner Sort node is gone.
+- Execution time: **0.346 ms** (was 3.148 ms). Buffers: shared hit=107 total, 25 for the Contributions part (was 138 and 56). Estimated rows 100 vs actual 26 on the index scan, because the Limit stops the scan after 26 rows (the estimate of 100 is the cycle's real size, not a bad estimate). Rows Removed by Filter: not present.
+- The remaining final Sort is EF Core's second ORDER BY after the joins, and it only sorts 26 rows.
+- Honest caveat: a cycle here has only 100 rows, so both timings are tiny and part of the time gap may be a warm cache. The more reliable evidence is the plan shape and buffers: no Sort over the whole cycle, 26 rows read instead of 100, and 25 buffers instead of 56. The gap grows with cycle size, because the old plan's cost grows with the rows in the cycle and the new plan's cost grows with the page size.
+
+**Why this column order:** `CycleId` is first because it is an equality filter, so the index narrows straight to one cycle's rows. `RecordedAtUtc` comes next because it is the sort, so those rows come out already in order and the Sort step disappears. `Id` is last because it is the tiebreaker, which also matches the keyset condition `(RecordedAtUtc, Id) > (last values)`. With the date first, Postgres could not use the index to find one cycle's rows.
+
+**Small development data** (48 contributions, 81 memberships):
+```
+Sort  (cost=4.18..4.19 rows=1 width=152) (actual time=0.093..0.095 rows=2.00 loops=1)
+  Sort Key: c0."RecordedAtUtc", c0."Id"
+  Sort Method: quicksort  Memory: 25kB
+  Buffers: shared hit=6
+  ->  Nested Loop  (cost=1.78..4.17 rows=1 width=152) (actual time=0.064..0.087 rows=2.00 loops=1)
+        Join Filter: (u."Id" = c0."UserId")
+        Buffers: shared hit=6
+        ->  Hash Join  (cost=1.64..3.65 rows=1 width=87) (actual time=0.056..0.075 rows=2.00 loops=1)
+              Hash Cond: ((s."UserId" = c0."UserId") AND (s."StokvelId" = c0."StokvelId"))
+              Buffers: shared hit=2
+              ->  Seq Scan on "StokvelMembers" s  (cost=0.00..1.57 rows=57 width=43) (actual time=0.021..0.032 rows=81.00 loops=1)
+                    Buffers: shared hit=1
+              ->  Hash  (cost=1.62..1.62 rows=1 width=76) (actual time=0.027..0.027 rows=2.00 loops=1)
+                    Buckets: 1024  Batches: 1  Memory Usage: 9kB
+                    Buffers: shared hit=1
+                    ->  Subquery Scan on c0  (cost=1.61..1.62 rows=1 width=76) (actual time=0.022..0.024 rows=2.00 loops=1)
+                          Buffers: shared hit=1
+                          ->  Limit  (cost=1.61..1.61 rows=1 width=76) (actual time=0.021..0.022 rows=2.00 loops=1)
+                                Buffers: shared hit=1
+                                ->  Sort  (cost=1.61..1.61 rows=1 width=76) (actual time=0.021..0.021 rows=2.00 loops=1)
+                                      Sort Key: c."RecordedAtUtc", c."Id"
+                                      Sort Method: quicksort  Memory: 25kB
+                                      Buffers: shared hit=1
+                                      ->  Seq Scan on "Contributions" c  (cost=0.00..1.60 rows=1 width=76) (actual time=0.009..0.014 rows=2.00 loops=1)
+                                            Filter: ("CycleId" = '519c0e0f-b727-4642-b523-60090a647005'::uuid)
+                                            Rows Removed by Filter: 46
+                                            Buffers: shared hit=1
+        ->  Index Scan using "PK_Users" on "Users" u  (cost=0.14..0.51 rows=1 width=97) (actual time=0.004..0.004 rows=1.00 loops=2)
+              Index Cond: ("Id" = s."UserId")
+              Index Searches: 2
+              Buffers: shared hit=4
+Planning:
+  Buffers: shared hit=8
+Planning Time: 0.517 ms
+Execution Time: 0.145 ms
+```
+- Nodes: **Seq Scan on Contributions** with `Filter: CycleId = ...`, then Sort (2 rows). Execution time 0.145 ms. Estimated rows 1 vs actual 2. Rows Removed by Filter: 46. Buffers for Contributions: 1.
+- **Why Postgres ignored the index, and why that is correct:** the whole Contributions table fits on one 8 kB page, so reading it costs one buffer. Using the index would mean reading an index page and then the table page, which is more work. The planner picks the plan with the lowest estimated cost, not the plan that uses an index. Filtering 48 rows and sorting 2 in memory costs almost nothing. The index only pays off once the table spans many pages, as the 18 000-row database shows. The estimate of 1 versus the actual 2 is a small statistics error on a tiny table and does not change the plan.
+
+## 5. Composite unique constraints
+| Rule (already enforced in C#) | Where C# enforces it | Constraint |
+|---|---|---|
+| A member contributes once per cycle | `ContributionService` -> `ExistsAsync` | unique index on `Contributions (CycleId, UserId)` |
+| A member is paid at most once per stokvel rotation | `PayoutService` ("Every member has already been paid") | unique index on `Payouts (StokvelId, RecipientUserId)` |
+
+Already in place before today and not counted: `Payouts (CycleId)` unique, `StokvelMembers (StokvelId, RotationPosition)` unique, and the StokvelMember composite primary key.
+
+**Query used to check existing data before applying:**
+```sql
+SELECT "CycleId", "UserId", COUNT(*) FROM "Contributions" GROUP BY "CycleId", "UserId" HAVING COUNT(*) > 1;
+SELECT "StokvelId", "RecipientUserId", COUNT(*) FROM "Payouts" GROUP BY "StokvelId", "RecipientUserId" HAVING COUNT(*) > 1;
+```
+Result: **0 rows and 0 rows**, so the migration was safe to apply.
+
+**Migration reading (compared with 5.1 and 5.2):** In 5.1 and 5.2 I checked for dropped or renamed columns, data loss and new NOT NULL columns. This time I checked that the migration contains only index operations and no column changes. The generated migration had four `AddColumn("xmin")` calls (see section 7), which I removed by hand. What remained was a `DropIndex` of the old non-unique `(CycleId, UserId)` index, a `CreateIndex(unique: true)` on Contributions, and a `CreateIndex(unique: true)` on Payouts. The second migration (`AddContributionPagingIndex`) contains exactly one `CreateIndex` and nothing else. Building an index takes a lock that blocks writes to that table while it builds, and it costs time and disk on a large table. On a large production table I would build it with `CREATE INDEX CONCURRENTLY`, outside a normal migration transaction. For this data size the lock is brief. Every unique index also makes each insert slightly slower, because Postgres must check it.
+
+**Why the service-layer check AND the constraint stay:** The C# check gives a clear, friendly error in the normal case ("X has already contributed for this cycle"). But two requests at the same moment can both read "no conflict" and both write; only the database sees both writes. The constraint also protects against scripts and manual data fixes that skip my C#. Deleting the C# check would turn every normal mistake into a generic conflict message.
+
+**Gaps (rules not enforced anywhere, so not added today):**
+- "One cycle number per stokvel": `ContributionCyclesController.Create` and `Update` never check it, and there is no unique index on `(StokvelId, CycleNumber)`. It is a missing business rule that needs a decision first.
+- "Email is unique": enforced only in C# (`EmailExistsAsync`) and it is a single column, so it is not a composite candidate. There is no unique index on `Users.Email` either.
+
+## 6. Constraint violations are 409
+A `DbUpdateException` with SQLSTATE `23505` is mapped to **409 Conflict** in `RondiExceptionHandler` (central handling, no try/catch in controllers). Two tests insert duplicates straight through a DbContext, bypassing the service check, and one test feeds a `23505` exception to the handler and checks for the 409 problem response.
+
+## 7. Concurrency protection (xmin)
+- **Protected** (`uint Version` + `IsRowVersion()`): `Stokvel`, `User` and `ContributionCycle` (all three have PUT endpoints), and `Payout` (mapped as the assignment minimum).
+- **Not protected:** `Contribution` and `StokvelMember`. They are never edited after creation: contributions are only created, and memberships are only added or removed.
+- **Payout** has no edit endpoint in RondiTrack, so there is nothing to round-trip through HTTP. Adding one would be a new feature, which the assignment forbids. The token is still mapped, so any future edit is protected. The real risk, two treasurers processing the same payout, is already blocked by the unique indexes on `Payouts (CycleId)` and `Payouts (StokvelId, RecipientUserId)`.
+- **Migration note:** the generated migration contained four `AddColumn("xmin")` calls (one per protected entity). I removed them by hand, together with the matching `DropColumn` calls in `Down`. `xmin` is a PostgreSQL system column that exists on every row, so adding it would fail. The mapping itself is correct: the model snapshot maps `Version` to the existing `xmin` column as a concurrency token, so later migrations do not try to add it again.
+- Side effect: adding or removing a member updates the Stokvel row, which changes its version. A client holding an old ETag correctly gets a 412 and must reload.
+
+## 8. How the token travels
+- `GET` (and `POST`) of a Stokvel, User or Cycle returns an **`ETag`** header containing the xmin version.
+- `PUT` must send it back in **`If-Match`**. A missing header gives **428 Precondition Required**; a malformed value gives **400**.
+- A stale token raises `DbUpdateConcurrencyException`, returned as **412 Precondition Failed** (problem response), because the client's `If-Match` precondition failed. The same exception without an `If-Match` header (a race inside the server) is returned as **409**.
+- Why a header and not a body field: it is the standard HTTP mechanism for this, and it keeps the request and response DTOs unchanged. List responses do not carry ETags, so a client must `GET` the single resource before editing it.
+
+## 9. Tests
+- `Two_contexts_editing_the_same_payout_raise_DbUpdateConcurrencyException`: two separate DbContexts load the same Payout, the first saves, the second then fails. A single context can never conflict with itself, because after its own save EF adopts the new xmin.
+- `Http_update_with_a_stale_etag_returns_412_problem`: GET, PUT (200), PUT with the same ETag (412 problem). It uses Stokvel because Payout has no edit endpoint.
+- `Http_update_without_if_match_returns_428_problem`.
+- Two tests hit the unique constraints directly through a DbContext, and one tests the 409 mapping in the handler.
+- `PagingTests`: walking all pages, negative page size, unknown sort, and token reuse with a different sort.
+- No `Thread.Sleep`, `Task.Delay` or parallelism: the order of operations is written out step by step.
+
+**Suite result**
+- Before the 5.3 changes: **25 passed, 0 failed**.
+- Old tests against the new code (new test files included): **35 total, 33 passed, 2 failed**.
+- After updating the two old tests: **35 total, 35 passed, 0 failed**.
+
+| Test that failed | Why | Test wrong or change wrong? |
+|---|---|---|
+| `GetMembers_For_Stokvel_With_No_Members_Returns_Empty_List` | Expected a bare array, but the body is now `{ items, nextPageToken }` | Test wrong: the contract never promised "everything" in a bare array |
+| `Update_User_Persists_After_Untracked_Read` | The PUT sent no `If-Match`, so it returned 428 | Test wrong: updates now need a token |
+
+The other tests (idempotency, member limits, contributions, validation) were unaffected, because each one creates a fresh stokvel, users and cycle per run with random names, so the new unique constraints never see leftover data.
+
+## 10. Definition of Done (new columns)
+| Endpoint | Paged & filtered in DB | Backed by DB constraint | Concurrency-protected |
+|---|---|---|---|
+| GET users (list) | no (not yet) | N-A: read-only | N-A: list, no edits |
+| GET user | N-A: single item | N-A | yes (returns ETag) |
+| POST user | N-A: single create | no (email unique only in C#, see gaps) | N-A: create only |
+| PUT user | N-A: single item | no (same email gap) | yes (If-Match, 412) |
+| DELETE user | N-A | N-A: FK restrict from 5.2 | N-A: delete |
+| GET stokvels (list) | no (not yet) | N-A | N-A: list |
+| GET stokvel | N-A: single item | N-A | yes (returns ETag) |
+| POST stokvel | N-A: single create | N-A | N-A: create only |
+| PUT stokvel | N-A: single item | N-A | yes (If-Match, 412) |
+| DELETE stokvel | N-A | N-A | N-A: delete |
+| GET stokvel members (list) | **yes** (keyset) | N-A: composite PK from 5.2 | N-A: list, no edits |
+| GET stokvel member | N-A: single item | N-A | N-A: membership is never edited |
+| POST member | N-A: single create | N-A: composite PK from 5.2 | N-A: create only |
+| DELETE member | N-A | N-A | N-A: delete |
+| GET cycles (list) | no (not yet) | N-A | N-A: list |
+| GET cycle | N-A: single item | N-A | yes (returns ETag) |
+| POST cycle | N-A: single create | no (cycle number rule is a gap) | N-A: create only |
+| PUT cycle | N-A: single item | no (same gap) | yes (If-Match, 412) |
+| DELETE cycle | N-A | N-A | N-A: delete |
+| GET cycle contributions (list) | **yes** (keyset + index) | yes (unique cycle + member) | N-A: list, no edits |
+| POST contribution | N-A: single create | yes (unique cycle + member) | N-A: create only |
+| Payout processing | N-A | yes (unique cycle; unique stokvel + recipient) | yes (xmin mapped; unique indexes block a double payout) |
+
+## 11. Gaps not closed yet
+- `GET /api/users`, `GET /api/stokvels` and `GET /api/stokvels/{id}/cycles` are not paged. Decision: kept exactly as they were; low volume today. `EfStokvelRepository.GetAllAsync` also filters in memory and should be fixed together with paging that endpoint.
+- No unique rule for cycle number per stokvel and none for email (see section 5). Both are business rules that need a decision first.
+- Payout has an xmin token but no edit endpoint, so the token cannot be round-tripped over HTTP (see section 7).
+- The idempotency store is still in memory (`InMemoryIdempotencyStore`), so it does not protect across several server instances. Out of scope for today.
+- Page tokens are opaque but not signed. A client could forge one, but it can only change its own position inside data the endpoint would already return.
+- `amount` sorting is not covered by an index.
+
+===== RondiTrack.Tests/ConcurrencyAndConstraintTests.cs =====
+using System.Net;
+using System.Net.Http.Json;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
+using Npgsql;
+using RondiTrack.Domain;
+using RondiTrack.Errors;
+using Xunit;
+
+namespace RondiTrack.Tests;
+
+public class ConcurrencyAndConstraintTests(WebApplicationFactory<Program> factory)
+    : IClassFixture<WebApplicationFactory<Program>>
+{
+    private readonly HttpClient _client = factory.CreateClient();
+
+    // ---------- xmin concurrency ----------
+
+    [Fact]
+    public async Task Two_contexts_editing_the_same_payout_raise_DbUpdateConcurrencyException()
+    {
+        var payoutId = await TestDb.SeedPayoutAsync();
+
+        // TWO contexts are required. Each context remembers the xmin it loaded. With ONE context there is
+        // only one copy of the row in memory, and after our own save EF adopts the new xmin, so the context
+        // can never see "someone else changed it". Conflicts only exist between two separate views of the row.
+        await using var ctxA = TestDb.NewDb();
+        await using var ctxB = TestDb.NewDb();
+
+        var a = await ctxA.Payouts.SingleAsync(p => p.Id == payoutId);
+        var b = await ctxB.Payouts.SingleAsync(p => p.Id == payoutId);   // both loaded the same version
+
+        ctxA.Entry(a).Property(p => p.Amount).CurrentValue = 200m;
+        await ctxA.SaveChangesAsync();                                    // first save wins and moves xmin forward
+
+        ctxB.Entry(b).Property(p => p.Amount).CurrentValue = 300m;
+        await Assert.ThrowsAsync<DbUpdateConcurrencyException>(() => ctxB.SaveChangesAsync());   // second is stale
+    }
+
+    [Fact]
+    public async Task Http_update_with_a_stale_etag_returns_412_problem()
+    {
+        // Stokvel is used for the HTTP test because it is one of the entities that has an edit endpoint.
+        // Payout has no edit endpoint in RondiTrack, and adding one would be a new feature.
+        var created = await _client.PostAsJsonAsync("/api/stokvels",
+            new { Name = $"Etag {Guid.NewGuid()}", ContributionAmount = 100m, Frequency = 1, MaxMembers = 5 });
+        var location = created.Headers.Location!;
+
+        var get = await _client.GetAsync(location);                      // GET: read the ETag
+        var etag = get.Headers.ETag!.Tag;
+
+        // First update with the token from the GET: must succeed.
+        var first = await PutStokvelAsync(location, "First Name", etag);
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+
+        // Second update with the SAME (now stale) token: must be 412 as a problem response.
+        var second = await PutStokvelAsync(location, "Second Name", etag);
+        Assert.Equal(HttpStatusCode.PreconditionFailed, second.StatusCode);
+        Assert.Equal("application/problem+json", second.Content.Headers.ContentType?.MediaType);
+    }
+
+    [Fact]
+    public async Task Http_update_without_if_match_returns_428_problem()
+    {
+        var created = await _client.PostAsJsonAsync("/api/stokvels",
+            new { Name = $"NoEtag {Guid.NewGuid()}", ContributionAmount = 100m, Frequency = 1, MaxMembers = 5 });
+
+        var response = await _client.PutAsJsonAsync(created.Headers.Location!,
+            new { Name = "x", ContributionAmount = 100m, Frequency = 1, MaxMembers = 5 });
+
+        Assert.Equal((HttpStatusCode)428, response.StatusCode);
+        Assert.Equal("application/problem+json", response.Content.Headers.ContentType?.MediaType);
+    }
+
+    private Task<HttpResponseMessage> PutStokvelAsync(Uri url, string name, string etag)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Put, url)
+        {
+            Content = JsonContent.Create(new { Name = name, ContributionAmount = 100m, Frequency = 1, MaxMembers = 5 })
+        };
+        request.Headers.TryAddWithoutValidation("If-Match", etag);
+        return _client.SendAsync(request);
+    }
+
+    // ---------- unique constraints (straight to the database, no service check) ----------
+
+    [Fact]
+    public async Task Database_rejects_a_second_contribution_for_the_same_member_and_cycle()
+    {
+        var (stokvelId, userId, cycleId) = await TestDb.SeedMemberAndCycleAsync();
+
+        await using (var db = TestDb.NewDb())
+        {
+            db.Contributions.Add(new Contribution(stokvelId, userId, cycleId, 100m));
+            await db.SaveChangesAsync();
+        }
+
+        // Straight to the DbContext: ContributionService.ExistsAsync is bypassed, only the constraint is left.
+        await using var db2 = TestDb.NewDb();
+        db2.Contributions.Add(new Contribution(stokvelId, userId, cycleId, 100m));
+
+        var ex = await Assert.ThrowsAsync<DbUpdateException>(() => db2.SaveChangesAsync());
+        Assert.Equal(PostgresErrorCodes.UniqueViolation, Assert.IsType<PostgresException>(ex.InnerException).SqlState);
+    }
+
+    [Fact]
+    public async Task Database_rejects_paying_the_same_member_twice_in_one_stokvel()
+    {
+        var (stokvelId, userId, cycleId) = await TestDb.SeedMemberAndCycleAsync();
+
+        await using var db = TestDb.NewDb();
+        var cycle2 = new ContributionCycle(stokvelId, 2, 100m);
+        db.ContributionCycles.Add(cycle2);
+        db.Payouts.Add(new Payout(stokvelId, cycleId, userId, 100m));
+        await db.SaveChangesAsync();
+
+        // Different cycle, same recipient, same stokvel: PayoutService would refuse, now the database does too.
+        await using var db2 = TestDb.NewDb();
+        db2.Payouts.Add(new Payout(stokvelId, cycle2.Id, userId, 100m));
+
+        var ex = await Assert.ThrowsAsync<DbUpdateException>(() => db2.SaveChangesAsync());
+        Assert.Equal(PostgresErrorCodes.UniqueViolation, Assert.IsType<PostgresException>(ex.InnerException).SqlState);
+    }
+
+    // ---------- the central handler turns 23505 into 409 ----------
+
+    [Fact]
+    public async Task Exception_handler_maps_a_unique_violation_to_409()
+    {
+        var handler = new RondiExceptionHandler(NullLogger<RondiExceptionHandler>.Instance);
+        var context = new DefaultHttpContext();
+        context.Response.Body = new MemoryStream();
+
+        var postgres = new PostgresException("duplicate key", "ERROR", "ERROR", PostgresErrorCodes.UniqueViolation);
+        var handled = await handler.TryHandleAsync(context, new DbUpdateException("dup", postgres), CancellationToken.None);
+
+        Assert.True(handled);
+        Assert.Equal(StatusCodes.Status409Conflict, context.Response.StatusCode);
+        Assert.Equal("application/problem+json", context.Response.ContentType);
+    }
+}
+
+===== RondiTrack.Tests/ContributionUnitTests.cs =====
+using RondiTrack.Data;
+using RondiTrack.Domain;
+using RondiTrack.Dtos;
+using RondiTrack.Services;
+using Xunit;
+
+namespace RondiTrack.Tests;
+
+public class ContributionServiceTests
+{
+    private static (ContributionService service, IStokvelRepository stokvels, IUserRepository users, IContributionCycleRepository cycles) Build()
+    {
+        var stokvels = new InMemoryStokvelRepository();
+        var users = new InMemoryUserRepository();
+        var cycles = new InMemoryContributionCycleRepository();
+        var contributions = new InMemoryContributionRepository();
+        var idempotency = new InMemoryIdempotencyStore();
+        var service = new ContributionService(stokvels, users, cycles, contributions, idempotency);
+        return (service, stokvels, users, cycles);
+    }
+
+    [Fact]
+    public async Task RecordContribution_Throws_When_Same_User_Pays_Same_Cycle_Twice()
+    {
+        var built = Build();
+        var stokvel = new Stokvel("Test", 100m, ContributionFrequency.Monthly, 5);
+        var user = new User("A", "a@example.com");
+        stokvel.AddMember(user);
+        await built.stokvels.AddAsync(stokvel);
+        await built.users.AddAsync(user);
+        var cycle = new ContributionCycle(stokvel.Id, 1, 100m);
+        await built.cycles.AddAsync(cycle);
+
+        var request = new ContributionRequest(user.Id, cycle.Id, 100m);
+        await built.service.RecordContributionAsync(stokvel.Id, request, "key-1");
+
+        await Assert.ThrowsAsync<DomainConflictException>(() =>
+            built.service.RecordContributionAsync(stokvel.Id, request, "key-2"));
+    }
+
+    [Fact]
+    public async Task RecordContribution_Replays_Same_Response_For_Same_Key_And_Same_Body()
+    {
+        var built = Build();
+        var stokvel = new Stokvel("Test", 100m, ContributionFrequency.Monthly, 5);
+        var user = new User("A", "a@example.com");
+        stokvel.AddMember(user);
+        await built.stokvels.AddAsync(stokvel);
+        await built.users.AddAsync(user);
+        var cycle = new ContributionCycle(stokvel.Id, 1, 100m);
+        await built.cycles.AddAsync(cycle);
+
+        var request = new ContributionRequest(user.Id, cycle.Id, 100m);
+        var first = await built.service.RecordContributionAsync(stokvel.Id, request, "same-key");
+        var second = await built.service.RecordContributionAsync(stokvel.Id, request, "same-key");
+
+        Assert.Equal(first.Response.Id, second.Response.Id);
+        Assert.True(second.WasReplayed);
+    }
+
+    [Fact]
+    public async Task RecordContribution_Throws_When_Same_Key_Used_With_Different_Body()
+    {
+        var built = Build();
+        var stokvel = new Stokvel("Test", 100m, ContributionFrequency.Monthly, 5);
+        var user = new User("A", "a@example.com");
+        stokvel.AddMember(user);
+        await built.stokvels.AddAsync(stokvel);
+        await built.users.AddAsync(user);
+        var cycle = new ContributionCycle(stokvel.Id, 1, 100m);
+        await built.cycles.AddAsync(cycle);
+
+        var request = new ContributionRequest(user.Id, cycle.Id, 100m);
+        await built.service.RecordContributionAsync(stokvel.Id, request, "reused-key");
+
+        var differentRequest = request with { Amount = 200m };
+
+        await Assert.ThrowsAsync<DomainConflictException>(() =>
+            built.service.RecordContributionAsync(stokvel.Id, differentRequest, "reused-key"));
+    }
+}
+
+===== RondiTrack.Tests/ErrorHandlingTests.cs =====
+using System.Net;
+using System.Net.Http.Json;
+using Microsoft.AspNetCore.Mvc.Testing;
+using Xunit;
+
+namespace RondiTrack.Tests;
+
+public class ErrorHandlingTests(WebApplicationFactory<Program> factory) : IClassFixture<WebApplicationFactory<Program>>
+{
+    private readonly HttpClient _client = factory.CreateClient();
+
+    [Fact]
+    public async Task Create_User_With_Empty_Name_Returns_400_ProblemJson()
+    {
+        var response = await _client.PostAsJsonAsync("/api/users", new { FullName = "", Email = "test@example.com" });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("application/problem+json", response.Content.Headers.ContentType?.MediaType);
+    }
+
+    [Fact]
+    public async Task Get_User_That_Does_Not_Exist_Returns_404_ProblemJson()
+    {
+        var response = await _client.GetAsync($"/api/users/{Guid.NewGuid()}");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Equal("application/problem+json", response.Content.Headers.ContentType?.MediaType);
+    }
+
+    [Fact]
+    public async Task Create_User_With_Duplicate_Email_Returns_409_ProblemJson()
+    {
+        var payload = new { FullName = "Test Person", Email = "thandi.nkosi@example.com" };
+
+        var response = await _client.PostAsJsonAsync("/api/users", payload);
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal("application/problem+json", response.Content.Headers.ContentType?.MediaType);
+    }
+}
+
+===== RondiTrack.Tests/IntergrationTest.cs =====
+using System.Net;
+using System.Net.Http.Json;
+using Microsoft.AspNetCore.Mvc.Testing;
+using Xunit;
+
+namespace RondiTrack.Tests;
+
+public class IntegrationTests(WebApplicationFactory<Program> factory) : IClassFixture<WebApplicationFactory<Program>>
+{
+    private readonly HttpClient _client = factory.CreateClient();
+
+    [Fact]
+    public async Task Create_User_With_Valid_Data_Returns_201()
+    {
+        var payload = new { FullName = "Zanele Mthembu", Email = $"zanele{Guid.NewGuid()}@example.com" };
+        var response = await _client.PostAsJsonAsync("/api/users", payload);
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Create_Stokvel_With_Valid_Data_Returns_201()
+    {
+        var payload = new { Name = $"Test Stokvel {Guid.NewGuid()}", ContributionAmount = 100m, Frequency = 1, MaxMembers = 5 };
+        var response = await _client.PostAsJsonAsync("/api/stokvels", payload);
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Create_Stokvel_With_MaxMembers_Below_Minimum_Returns_400()
+    {
+        var payload = new { Name = "Bad Stokvel", ContributionAmount = 100m, Frequency = 1, MaxMembers = 1 };
+        var response = await _client.PostAsJsonAsync("/api/stokvels", payload);
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("application/problem+json", response.Content.Headers.ContentType?.MediaType);
+    }
+
+    [Fact]
+    public async Task Get_Stokvel_That_Does_Not_Exist_Returns_404()
+    {
+        var response = await _client.GetAsync($"/api/stokvels/{Guid.NewGuid()}");
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Equal("application/problem+json", response.Content.Headers.ContentType?.MediaType);
+    }
+
+    [Fact]
+    public async Task AddMember_To_Full_Stokvel_Returns_409()
+    {
+        var stokvel = await CreateStokvelAsync(2);
+        var user1 = await CreateUserAsync();
+        var user2 = await CreateUserAsync();
+        var user3 = await CreateUserAsync();
+
+        await _client.PostAsJsonAsync($"/api/stokvels/{stokvel.Id}/members", new { UserId = user1.Id });
+        await _client.PostAsJsonAsync($"/api/stokvels/{stokvel.Id}/members", new { UserId = user2.Id });
+        var response = await _client.PostAsJsonAsync($"/api/stokvels/{stokvel.Id}/members", new { UserId = user3.Id });
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+        Assert.Equal("application/problem+json", response.Content.Headers.ContentType?.MediaType);
+    }
+
+    [Fact]
+    public async Task AddMember_With_NonExistent_User_Returns_422()
+    {
+        var stokvel = await CreateStokvelAsync(5);
+        var response = await _client.PostAsJsonAsync($"/api/stokvels/{stokvel.Id}/members", new { UserId = Guid.NewGuid() });
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, response.StatusCode);
+        Assert.Equal("application/problem+json", response.Content.Headers.ContentType?.MediaType);
+    }
+
+    [Fact]
+    public async Task Repeated_Contribution_Request_With_Same_Key_Returns_Identical_Response()
+    {
+        var (stokvelId, userId, cycleId) = await SeedStokvelWithMemberAndCycleAsync();
+        var key = $"idem-{Guid.NewGuid()}";
+        var payload = new { UserId = userId, CycleId = cycleId, Amount = 100m };
+
+        var response1 = await SendContributionAsync(stokvelId, payload, key);
+        var body1 = await response1.Content.ReadAsStringAsync();
+
+        var response2 = await SendContributionAsync(stokvelId, payload, key);
+        var body2 = await response2.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.Created, response1.StatusCode);
+        Assert.Equal(HttpStatusCode.Created, response2.StatusCode);
+        Assert.Equal(body1, body2);
+    }
+
+    [Fact]
+    public async Task Same_Idempotency_Key_With_Different_Payload_Returns_409()
+    {
+        var (stokvelId, userId, cycleId) = await SeedStokvelWithMemberAndCycleAsync();
+        var key = $"idem-{Guid.NewGuid()}";
+
+        await SendContributionAsync(stokvelId, new { UserId = userId, CycleId = cycleId, Amount = 100m }, key);
+        var response2 = await SendContributionAsync(stokvelId, new { UserId = userId, CycleId = cycleId, Amount = 200m }, key);
+
+        Assert.Equal(HttpStatusCode.Conflict, response2.StatusCode);
+        Assert.Equal("application/problem+json", response2.Content.Headers.ContentType?.MediaType);
+    }
+
+    [Fact]
+    public async Task Second_Contribution_For_Same_User_And_Cycle_With_New_Key_Returns_409()
+    {
+        var (stokvelId, userId, cycleId) = await SeedStokvelWithMemberAndCycleAsync();
+        var payload = new { UserId = userId, CycleId = cycleId, Amount = 100m };
+
+        await SendContributionAsync(stokvelId, payload, $"key-{Guid.NewGuid()}");
+        var response2 = await SendContributionAsync(stokvelId, payload, $"key-{Guid.NewGuid()}");
+
+        Assert.Equal(HttpStatusCode.Conflict, response2.StatusCode);
+    }
+
+    [Fact]
+    public async Task Contribution_Request_Missing_Idempotency_Key_Returns_400()
+    {
+        var (stokvelId, userId, cycleId) = await SeedStokvelWithMemberAndCycleAsync();
+        var payload = new { UserId = userId, CycleId = cycleId, Amount = 100m };
+        var response = await _client.PostAsJsonAsync($"/api/stokvels/{stokvelId}/contributions", payload);
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    // ---- Edge cases ----
+
+    [Fact]
+    public async Task GetMembers_For_Stokvel_With_No_Members_Returns_Empty_List()
+    {
+        var stokvel = await CreateStokvelAsync(5);
+        var response = await _client.GetAsync($"/api/stokvels/{stokvel.Id}/members");
+
+        // EDIT 5.3: the endpoint is paged now, so the body is { items: [], nextPageToken: "" }, not a bare array.
+        var page = await response.Content.ReadFromJsonAsync<MembersPageDto>();
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Empty(page!.Items);
+        Assert.Equal("", page.NextPageToken);
+    }
+
+    [Fact]
+    public async Task Create_Stokvel_With_MaxMembers_At_Exactly_The_Minimum_Boundary_Succeeds()
+    {
+        var payload = new { Name = $"Boundary Stokvel {Guid.NewGuid()}", ContributionAmount = 100m, Frequency = 1, MaxMembers = 2 };
+        var response = await _client.PostAsJsonAsync("/api/stokvels", payload);
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task RecordContribution_For_Cycle_Belonging_To_A_Different_Stokvel_Returns_422()
+    {
+        var (stokvelAId, userId, _) = await SeedStokvelWithMemberAndCycleAsync();
+        var (_, _, cycleBId) = await SeedStokvelWithMemberAndCycleAsync();
+
+        var payload = new { UserId = userId, CycleId = cycleBId, Amount = 100m };
+        var response = await SendContributionAsync(stokvelAId, payload, $"key-{Guid.NewGuid()}");
+
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, response.StatusCode);
+    }
+
+    // ---- Helpers ----
+
+    private async Task<HttpResponseMessage> SendContributionAsync(Guid stokvelId, object payload, string key)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, $"/api/stokvels/{stokvelId}/contributions")
+        {
+            Content = JsonContent.Create(payload)
+        };
+        request.Headers.Add("Idempotency-Key", key);
+        return await _client.SendAsync(request);
+    }
+
+    private async Task<StokvelResponseDto> CreateStokvelAsync(int maxMembers)
+    {
+        var payload = new { Name = $"Stokvel {Guid.NewGuid()}", ContributionAmount = 100m, Frequency = 1, MaxMembers = maxMembers };
+        var response = await _client.PostAsJsonAsync("/api/stokvels", payload);
+        return (await response.Content.ReadFromJsonAsync<StokvelResponseDto>())!;
+    }
+
+    private async Task<UserResponseDto> CreateUserAsync()
+    {
+        var payload = new { FullName = $"Test User {Guid.NewGuid()}", Email = $"user{Guid.NewGuid()}@example.com" };
+        var response = await _client.PostAsJsonAsync("/api/users", payload);
+        return (await response.Content.ReadFromJsonAsync<UserResponseDto>())!;
+    }
+
+    private async Task<(Guid StokvelId, Guid UserId, Guid CycleId)> SeedStokvelWithMemberAndCycleAsync()
+    {
+        var stokvel = await CreateStokvelAsync(5);
+        var user = await CreateUserAsync();
+        await _client.PostAsJsonAsync($"/api/stokvels/{stokvel.Id}/members", new { UserId = user.Id });
+
+        var cyclePayload = new { CycleNumber = 1, TargetAmount = 100m };
+        var cycleResponse = await _client.PostAsJsonAsync($"/api/stokvels/{stokvel.Id}/cycles", cyclePayload);
+        var cycle = (await cycleResponse.Content.ReadFromJsonAsync<CycleResponseDto>())!;
+
+        return (stokvel.Id, user.Id, cycle.Id);
+    }
+
+    private sealed record StokvelResponseDto(Guid Id);
+    private sealed record UserResponseDto(Guid Id);
+    private sealed record CycleResponseDto(Guid Id);
+    private sealed record MembersPageDto(List<object> Items, string NextPageToken);   // ADDED 5.3
+}
+
+===== RondiTrack.Tests/PagingTests.cs =====
+using System.Net;
+using System.Net.Http.Json;
+using Microsoft.AspNetCore.Mvc.Testing;
+using Xunit;
+
+namespace RondiTrack.Tests;
+
+// NEW 5.3: proves the paging contract through the real HTTP endpoint.
+public class PagingTests(WebApplicationFactory<Program> factory) : IClassFixture<WebApplicationFactory<Program>>
+{
+    private readonly HttpClient _client = factory.CreateClient();
+
+    // Builds a stokvel with 3 members who each contributed once. Returns the list URL.
+    private async Task<string> SeedThreeContributionsAsync()
+    {
+        var stokvel = (await (await _client.PostAsJsonAsync("/api/stokvels",
+            new { Name = $"Paging {Guid.NewGuid()}", ContributionAmount = 100m, Frequency = 1, MaxMembers = 5 }))
+            .Content.ReadFromJsonAsync<IdDto>())!;
+
+        var cycle = (await (await _client.PostAsJsonAsync($"/api/stokvels/{stokvel.Id}/cycles",
+            new { CycleNumber = 1, TargetAmount = 100m })).Content.ReadFromJsonAsync<IdDto>())!;
+
+        for (var i = 0; i < 3; i++)
+        {
+            var user = (await (await _client.PostAsJsonAsync("/api/users",
+                new { FullName = $"Pager {i}", Email = $"pager{Guid.NewGuid()}@example.com" }))
+                .Content.ReadFromJsonAsync<IdDto>())!;
+            await _client.PostAsJsonAsync($"/api/stokvels/{stokvel.Id}/members", new { UserId = user.Id });
+
+            var request = new HttpRequestMessage(HttpMethod.Post, $"/api/stokvels/{stokvel.Id}/contributions")
+            {
+                Content = JsonContent.Create(new { UserId = user.Id, CycleId = cycle.Id, Amount = 100m })
+            };
+            request.Headers.Add("Idempotency-Key", $"k-{Guid.NewGuid()}");
+            await _client.SendAsync(request);
+        }
+
+        return $"/api/stokvels/{stokvel.Id}/cycles/{cycle.Id}/contributions";
+    }
+
+    [Fact]
+    public async Task Walking_all_pages_returns_every_row_once_and_ends_with_an_empty_token()
+    {
+        var url = await SeedThreeContributionsAsync();
+        var seen = new List<Guid>();
+        var token = "";
+
+        do
+        {
+            var query = $"{url}?pageSize=2" + (token == "" ? "" : $"&pageToken={Uri.EscapeDataString(token)}");
+            var page = (await _client.GetFromJsonAsync<PageDto>(query))!;
+            seen.AddRange(page.Items.Select(i => i.Id));
+            token = page.NextPageToken;
+        } while (token != "");
+
+        Assert.Equal(3, seen.Count);
+        Assert.Equal(3, seen.Distinct().Count());
+    }
+
+    [Fact]
+    public async Task Negative_page_size_returns_400()
+    {
+        var url = await SeedThreeContributionsAsync();
+        var response = await _client.GetAsync($"{url}?pageSize=-1");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("application/problem+json", response.Content.Headers.ContentType?.MediaType);
+    }
+
+    [Fact]
+    public async Task Unknown_sort_field_returns_400()
+    {
+        var url = await SeedThreeContributionsAsync();
+        var response = await _client.GetAsync($"{url}?sort=memberName");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("application/problem+json", response.Content.Headers.ContentType?.MediaType);
+    }
+
+    [Fact]
+    public async Task Token_reused_with_a_different_sort_returns_400()
+    {
+        var url = await SeedThreeContributionsAsync();
+        var first = (await _client.GetFromJsonAsync<PageDto>($"{url}?pageSize=1"))!;
+        Assert.NotEqual("", first.NextPageToken);
+
+        var response = await _client.GetAsync(
+            $"{url}?pageSize=1&sort=-date&pageToken={Uri.EscapeDataString(first.NextPageToken)}");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    private sealed record IdDto(Guid Id);
+    private sealed record PageDto(List<IdDto> Items, string NextPageToken);
+}
+
+===== RondiTrack.Tests/PayoutTransactionTest.cs =====
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
+using RondiTrack.Data;
+using RondiTrack.Domain;
+using RondiTrack.Services;
+
+namespace RondiTrack.Tests;
+
+public class PayoutTransactionTests
+{
+    // A hook that throws between the two writes, to force a failure mid-transaction
+    private sealed class ThrowingHook : IPayoutFaultHook
+    {
+        public void AfterPayoutInserted() =>
+            throw new InvalidOperationException("Simulated failure after the payout insert");
+    }
+
+    private static RondiTrackDbContext NewDb()
+    {
+        var config = new ConfigurationBuilder()
+            .AddUserSecrets(typeof(Program).Assembly)
+            .Build();
+
+        var connectionString = config.GetConnectionString("RondiTrack")
+            ?? throw new InvalidOperationException("ConnectionStrings:RondiTrack is not set in user secrets.");
+
+        var options = new DbContextOptionsBuilder<RondiTrackDbContext>()
+            .UseNpgsql(connectionString, n => n.EnableRetryOnFailure(4, TimeSpan.FromSeconds(10), null))
+            .Options;
+
+        return new RondiTrackDbContext(options);
+    }
+
+    // EDIT 5.2: with real foreign keys the parents (users, stokvel) must be saved BEFORE members, cycle and contributions.
+    // It now returns the first member's UserId (StokvelMember has no Id any more).
+    private static async Task<(Guid StokvelId, Guid CycleId, Guid FirstUserId)> SeedAsync()
+    {
+        using var db = NewDb();
+
+        var stokvel = new Stokvel($"Payout Test {Guid.NewGuid()}", 100m, ContributionFrequency.Monthly, 5);
+        var user1 = new User("Payout One", $"p1-{Guid.NewGuid()}@example.com");
+        var user2 = new User("Payout Two", $"p2-{Guid.NewGuid()}@example.com");
+        var cycle = new ContributionCycle(stokvel.Id, 1, 200m);
+
+        db.Users.AddRange(user1, user2);
+        db.Stokvels.Add(stokvel);
+        await db.SaveChangesAsync();                       // parents first
+
+        db.StokvelMembers.AddRange(
+            new StokvelMember(stokvel.Id, user1.Id, 1),
+            new StokvelMember(stokvel.Id, user2.Id, 2));
+        db.ContributionCycles.Add(cycle);
+        await db.SaveChangesAsync();                       // then members and cycle
+
+        db.Contributions.AddRange(
+            new Contribution(stokvel.Id, user1.Id, cycle.Id, 100m),
+            new Contribution(stokvel.Id, user2.Id, cycle.Id, 100m));
+        await db.SaveChangesAsync();                       // then contributions
+
+        return (stokvel.Id, cycle.Id, user1.Id);
+    }
+
+    [Fact]
+    public async Task ProcessNextPayout_WhenItFailsAfterThePayoutInsert_LeavesNothingBehind()
+    {
+        var (stokvelId, cycleId, _) = await SeedAsync();
+
+        using (var db = NewDb())
+        {
+            // EDIT 5.2: PayoutService now takes the member repository too
+            var service = new PayoutService(db, new ThrowingHook(), new EfStokvelMemberRepository(db));
+            await Assert.ThrowsAsync<InvalidOperationException>(
+                () => service.ProcessNextPayoutAsync(stokvelId, cycleId));
+        }
+
+        // Re-query with a brand new DbContext: the database is the evidence, not a status code
+        using var verify = NewDb();
+        Assert.Equal(0, await verify.Payouts.CountAsync(p => p.CycleId == cycleId));
+
+        var cycle = await verify.ContributionCycles.SingleAsync(c => c.Id == cycleId);
+        Assert.Equal(CycleStatus.Open, cycle.Status);
+    }
+
+    [Fact]
+    public async Task ProcessNextPayout_PaysTheFirstMemberInRotationAndMarksTheCyclePaidOut()
+    {
+        var (stokvelId, cycleId, firstUserId) = await SeedAsync();
+
+        using (var db = NewDb())
+        {
+            var result = await new PayoutService(db, new NoOpPayoutFaultHook(), new EfStokvelMemberRepository(db))
+                .ProcessNextPayoutAsync(stokvelId, cycleId);
+
+            Assert.Equal(firstUserId, result.RecipientUserId);   // EDIT 5.2: was RecipientMemberId
+            Assert.Equal(200m, result.Amount);
+        }
+
+        using var verify = NewDb();
+        Assert.Equal(1, await verify.Payouts.CountAsync(p => p.CycleId == cycleId));
+
+        var cycle = await verify.ContributionCycles.SingleAsync(c => c.Id == cycleId);
+        Assert.Equal(CycleStatus.PaidOut, cycle.Status);
+    }
+}
+
+===== RondiTrack.Tests/RondiTrack.Tests.csproj =====
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.4" />
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.12" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore" Version="10.0.12" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="10.0.12" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\RondiTrack.csproj" />
+  </ItemGroup>
+
+</Project>
+
+===== RondiTrack.Tests/StokvelUnitTests.cs =====
+using RondiTrack.Domain;
+using Xunit;
+
+namespace RondiTrack.Tests;
+
+public class StokvelMembershipTests
+{
+    [Fact]
+    public void AddMember_Throws_When_Stokvel_Is_Full()
+    {
+        var stokvel = new Stokvel("Test", 100m, ContributionFrequency.Monthly, 2);
+        var user1 = new User("A", "a@example.com");
+        var user2 = new User("B", "b@example.com");
+        var user3 = new User("C", "c@example.com");
+        stokvel.AddMember(user1);
+        stokvel.AddMember(user2);
+
+        Assert.Throws<DomainConflictException>(() => stokvel.AddMember(user3));
+    }
+
+    [Fact]
+    public void AddMember_Throws_When_User_Already_A_Member()
+    {
+        var stokvel = new Stokvel("Test", 100m, ContributionFrequency.Monthly, 5);
+        var user = new User("A", "a@example.com");
+        stokvel.AddMember(user);
+
+        Assert.Throws<DomainConflictException>(() => stokvel.AddMember(user));
+    }
+
+    [Fact]
+    public void AddMember_Succeeds_When_Space_Available_And_Not_Already_Member()
+    {
+        var stokvel = new Stokvel("Test", 100m, ContributionFrequency.Monthly, 5);
+        var user = new User("A", "a@example.com");
+
+        stokvel.AddMember(user);
+
+        Assert.True(stokvel.HasMember(user.Id));
+    }
+}
+
+===== RondiTrack.Tests/Test.Db.cs =====
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
+using RondiTrack.Data;
+using RondiTrack.Domain;
+
+namespace RondiTrack.Tests;
+
+// NEW 5.3: helpers so tests can talk to PostgreSQL directly with their own DbContexts.
+public static class TestDb
+{
+    // Every call returns a brand new, independent DbContext (own connection, own tracking).
+    public static RondiTrackDbContext NewDb()
+    {
+        var config = new ConfigurationBuilder()
+            .AddUserSecrets(typeof(Program).Assembly)
+            .Build();
+
+        var connectionString = config.GetConnectionString("RondiTrack")
+            ?? throw new InvalidOperationException("ConnectionStrings:RondiTrack is not set in user secrets.");
+
+        var options = new DbContextOptionsBuilder<RondiTrackDbContext>()
+            .UseNpgsql(connectionString, n => n.EnableRetryOnFailure(4, TimeSpan.FromSeconds(10), null))
+            .Options;
+
+        return new RondiTrackDbContext(options);
+    }
+
+    // A brand new stokvel + user + member + cycle, so a test never depends on leftover data.
+    public static async Task<(Guid StokvelId, Guid UserId, Guid CycleId)> SeedMemberAndCycleAsync()
+    {
+        await using var db = NewDb();
+
+        var stokvel = new Stokvel($"Test {Guid.NewGuid()}", 100m, ContributionFrequency.Monthly, 5);
+        var user = new User("Test Member", $"t-{Guid.NewGuid()}@example.com");
+        db.Users.Add(user);
+        db.Stokvels.Add(stokvel);
+        await db.SaveChangesAsync();                 // parents first
+
+        var cycle = new ContributionCycle(stokvel.Id, 1, 100m);
+        db.StokvelMembers.Add(new StokvelMember(stokvel.Id, user.Id, 1));
+        db.ContributionCycles.Add(cycle);
+        await db.SaveChangesAsync();
+
+        return (stokvel.Id, user.Id, cycle.Id);
+    }
+
+    public static async Task<Guid> SeedPayoutAsync()
+    {
+        var (stokvelId, userId, cycleId) = await SeedMemberAndCycleAsync();
+        await using var db = NewDb();
+        var payout = new Payout(stokvelId, cycleId, userId, 100m);
+        db.Payouts.Add(payout);
+        await db.SaveChangesAsync();
+        return payout.Id;
+    }
+}
+
+===== RondiTrack.Tests/UntrackedReadTests.cs =====
+using System.Net;
+using System.Net.Http.Json;
+using Microsoft.AspNetCore.Mvc.Testing;
+using Xunit;
+
+namespace RondiTrack.Tests;
+
+// EDIT 5.2: new file. Proves a PUT still persists now that every read is AsNoTracking
+// EDIT 5.3: the PUT must now send If-Match (the ETag from the POST/GET), otherwise it is a 428.
+public class UntrackedReadTests(WebApplicationFactory<Program> factory) : IClassFixture<WebApplicationFactory<Program>>
+{
+    private readonly HttpClient _client = factory.CreateClient();
+
+    [Fact]
+    public async Task Update_User_Persists_After_Untracked_Read()
+    {
+        var created = await _client.PostAsJsonAsync("/api/users",
+            new { FullName = "Before Rename", Email = $"before{Guid.NewGuid()}@example.com" });
+        var user = (await created.Content.ReadFromJsonAsync<UserDto>())!;
+        var etag = created.Headers.ETag!.Tag;   // EDIT 5.3: the token comes back with the response
+
+        var newName = $"Renamed {Guid.NewGuid()}";
+        var request = new HttpRequestMessage(HttpMethod.Put, $"/api/users/{user.Id}")
+        {
+            Content = JsonContent.Create(new { FullName = newName, Email = $"after{Guid.NewGuid()}@example.com" })
+        };
+        request.Headers.TryAddWithoutValidation("If-Match", etag);   // EDIT 5.3
+        var put = await _client.SendAsync(request);
+        Assert.Equal(HttpStatusCode.OK, put.StatusCode);
+
+        var get = await _client.GetFromJsonAsync<UserDto>($"/api/users/{user.Id}");
+        Assert.Equal(newName, get!.FullName);
+    }
+
+    private sealed record UserDto(Guid Id, string FullName);
+}
+
+===== RondiTrack.csproj =====
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UserSecretsId>bbe90fbd-e83b-464c-9efe-0eba0f1e6237</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="FluentValidation" Version="12.1.1" />
+    <PackageReference Include="FluentValidation.DependencyInjectionExtensions" Version="12.1.1" />
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.3" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.12">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
+    <PackageReference Include="Scalar.AspNetCore" Version="2.17.7" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="RondiTrack.Tests\**" />
+    <Content Remove="RondiTrack.Tests\**" />
+    <None Remove="RondiTrack.Tests\**" />
+    <EmbeddedResource Remove="RondiTrack.Tests\**" />
+  </ItemGroup>
+
+</Project>
+
+===== RondiTrack.slnx =====
+<Solution>
+  <Project Path="RondiTrack.csproj" />
+  <Project Path="RondiTrack.Tests/RondiTrack.Tests.csproj" />
+</Solution>
+
+===== Services/ContributionPagingService.cs =====
+using System.Globalization;
+using Microsoft.EntityFrameworkCore;
+using RondiTrack.Api.Common.Paging;
+using RondiTrack.Data;
+using RondiTrack.Domain;
+using RondiTrack.Dtos;
+
+namespace RondiTrack.Services;
+
+// CHANGED: rewritten for your real names (RondiTrackDbContext, Guid ids, RecordedAtUtc).
+// The whole query is built as IQueryable, so WHERE / ORDER BY / LIMIT run inside PostgreSQL.
+public sealed class ContributionPagingService(RondiTrackDbContext db)
+{
+    // The ONLY sorts a client may ask for. Anything else is a 400.
+    private static readonly string[] AllowedSorts = ["date", "-date", "amount", "-amount"];
+
+    public async Task<PagedResponse<ContributionDetailResponse>> ListAsync(
+        Guid cycleId, ContributionListQuery q, CancellationToken ct)
+    {
+        var pageSize = PagingDefaults.Resolve(q.PageSize);
+
+        var sort = string.IsNullOrWhiteSpace(q.Sort) ? "date" : q.Sort.Trim().ToLowerInvariant();
+        if (!AllowedSorts.Contains(sort))
+            throw new ApiBadRequestException(
+                $"Unknown sort '{q.Sort}'. Allowed: {string.Join(", ", AllowedSorts)}.");
+
+        var from = ToUtc(q.DateFrom);
+        var to = ToUtc(q.DateTo);
+        if (from.HasValue && to.HasValue && from > to)
+            throw new ApiBadRequestException("dateFrom cannot be after dateTo.");
+
+        IQueryable<Contribution> query = db.Contributions
+            .AsNoTracking()
+            .Where(c => c.CycleId == cycleId);
+
+        if (q.UserId.HasValue)
+        {
+            var uid = q.UserId.Value;
+            query = query.Where(c => c.UserId == uid);
+        }
+        if (from.HasValue)
+        {
+            var f = from.Value;
+            query = query.Where(c => c.RecordedAtUtc >= f);
+        }
+        if (to.HasValue)
+        {
+            var t = to.Value;
+            query = query.Where(c => c.RecordedAtUtc <= t);
+        }
+
+        // Fingerprint of sort + filters, stored inside every token we hand out.
+        var context = PageTokenCodec.ContextOf(
+            sort, cycleId, q.UserId, from?.ToString("O"), to?.ToString("O"));
+
+        if (!string.IsNullOrEmpty(q.PageToken))
+        {
+            var cursor = PageTokenCodec.Decode(q.PageToken, context);
+            query = ApplyAfterCursor(query, sort, cursor);   // keyset: "rows after the last one you saw"
+        }
+
+        query = ApplyOrder(query, sort);
+
+        // Ask for ONE extra row. If it comes back, there is a next page.
+        var rows = await query
+            .Take(pageSize + 1)
+            .Select(c => new ContributionDetailResponse(
+                c.Id, c.UserId, c.Member.User.FullName, c.Member.User.Email,
+                c.Member.Role, c.Member.RotationPosition, c.Amount, c.RecordedAtUtc))
+            .ToListAsync(ct);
+
+        var hasMore = rows.Count > pageSize;
+        var page = rows.Take(pageSize).ToList();
+
+        var next = "";
+        if (hasMore)
+        {
+            var last = page[^1];
+            var lastValue = sort.EndsWith("date")
+                ? last.RecordedAtUtc.ToString("O", CultureInfo.InvariantCulture)
+                : last.Amount.ToString(CultureInfo.InvariantCulture);
+            next = PageTokenCodec.Encode(new PageCursor(context, lastValue, last.Id));
+        }
+
+        return new PagedResponse<ContributionDetailResponse>(page, next);
+    }
+
+    // Every sort ends with Id, so rows with equal date/amount always come in the same order.
+    private static IQueryable<Contribution> ApplyOrder(IQueryable<Contribution> q, string sort) => sort switch
+    {
+        "date"   => q.OrderBy(c => c.RecordedAtUtc).ThenBy(c => c.Id),
+        "-date"  => q.OrderByDescending(c => c.RecordedAtUtc).ThenByDescending(c => c.Id),
+        "amount" => q.OrderBy(c => c.Amount).ThenBy(c => c.Id),
+        _        => q.OrderByDescending(c => c.Amount).ThenByDescending(c => c.Id),
+    };
+
+    // Keyset condition: rows that come AFTER (lastValue, lastId) in the chosen order.
+    private static IQueryable<Contribution> ApplyAfterCursor(
+        IQueryable<Contribution> q, string sort, PageCursor cur)
+    {
+        var lastId = cur.LastId;
+
+        if (sort.EndsWith("date"))
+        {
+            if (!DateTime.TryParse(cur.LastValue, CultureInfo.InvariantCulture,
+                    DateTimeStyles.RoundtripKind, out var parsed))
+                throw new ApiBadRequestException("pageToken is invalid.");
+
+            var d = DateTime.SpecifyKind(parsed, DateTimeKind.Utc);
+            return sort == "date"
+                ? q.Where(c => c.RecordedAtUtc > d || (c.RecordedAtUtc == d && c.Id.CompareTo(lastId) > 0))
+                : q.Where(c => c.RecordedAtUtc < d || (c.RecordedAtUtc == d && c.Id.CompareTo(lastId) < 0));
+        }
+
+        if (!decimal.TryParse(cur.LastValue, NumberStyles.Number, CultureInfo.InvariantCulture, out var a))
+            throw new ApiBadRequestException("pageToken is invalid.");
+
+        return sort == "amount"
+            ? q.Where(c => c.Amount > a || (c.Amount == a && c.Id.CompareTo(lastId) > 0))
+            : q.Where(c => c.Amount < a || (c.Amount == a && c.Id.CompareTo(lastId) < 0));
+    }
+
+    // npgsql only accepts UTC for timestamptz, so a date typed by a client is treated as UTC.
+    private static DateTime? ToUtc(DateTime? value) => value is null ? null
+        : value.Value.Kind == DateTimeKind.Utc ? value
+        : value.Value.Kind == DateTimeKind.Local ? value.Value.ToUniversalTime()
+        : DateTime.SpecifyKind(value.Value, DateTimeKind.Utc);
+}
+
+===== Services/ContributionServices.cs =====
+using System.Security.Cryptography;
+using System.Text;
+using RondiTrack.Data;
+using RondiTrack.Domain;
+using RondiTrack.Dtos;
+
+namespace RondiTrack.Services;
+
+public interface IContributionService
+{
+    Task<(ContributionResponse Response, bool WasReplayed)> RecordContributionAsync(
+        Guid stokvelId, ContributionRequest request, string idempotencyKey);
+}
+
+public sealed class ContributionService(
+    IStokvelRepository stokvels,
+    IUserRepository users,
+    IContributionCycleRepository cycles,
+    IContributionRepository contributions,
+    IIdempotencyStore idempotencyStore) : IContributionService
+{
+    public async Task<(ContributionResponse Response, bool WasReplayed)> RecordContributionAsync(
+        Guid stokvelId, ContributionRequest request, string idempotencyKey)
+    {
+        var requestHash = ComputeHash(stokvelId, request);
+
+        var existing = await idempotencyStore.GetAsync(idempotencyKey);
+        if (existing is not null)
+        {
+            if (existing.RequestHash != requestHash)
+                throw new DomainConflictException("This Idempotency-Key was already used with a different request body.");
+
+            return (existing.Response, true);
+        }
+
+        var stokvel = await stokvels.GetByIdAsync(stokvelId)
+            ?? throw new DomainNotFoundException($"Stokvel {stokvelId} was not found.");
+
+        var user = await users.GetByIdAsync(request.UserId)
+            ?? throw new DomainReferenceException($"User {request.UserId} does not exist.");
+
+        if (!stokvel.HasMember(user.Id))
+            throw new DomainReferenceException($"{user.FullName} is not a member of '{stokvel.Name}'.");
+
+        var cycle = await cycles.GetByIdAsync(request.CycleId);
+        if (cycle is null || cycle.StokvelId != stokvelId)
+            throw new DomainReferenceException($"Cycle {request.CycleId} does not exist for this stokvel.");
+
+        if (await contributions.ExistsAsync(stokvelId, user.Id, request.CycleId))
+            throw new DomainConflictException($"{user.FullName} has already contributed for this cycle.");
+
+        var contribution = new Contribution(stokvelId, user.Id, request.CycleId, request.Amount);
+        await contributions.AddAsync(contribution);
+
+        var response = contribution.ToResponse();
+        await idempotencyStore.SaveAsync(idempotencyKey, new IdempotencyRecord(requestHash, response));
+
+        return (response, false);
+    }
+
+    private static string ComputeHash(Guid stokvelId, ContributionRequest request)
+    {
+        var raw = $"{stokvelId}|{request.UserId}|{request.CycleId}|{request.Amount}";
+        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(raw));
+        return Convert.ToHexString(bytes);
+    }
+}
+
+===== Services/MemberPagingService.cs =====
+using Microsoft.EntityFrameworkCore;
+using RondiTrack.Api.Common.Paging;
+using RondiTrack.Data;
+using RondiTrack.Dtos;
+
+namespace RondiTrack.Services;
+
+// NEW: second paged endpoint. Members of a stokvel, in rotation order.
+// RotationPosition is unique per stokvel (unique index from 5.2), so it is its own tiebreaker.
+public sealed class MemberPagingService(RondiTrackDbContext db)
+{
+    // Returns null when the stokvel does not exist (controller turns that into 404).
+    public async Task<PagedResponse<UserResponse>?> ListAsync(
+        Guid stokvelId, int? pageSizeRequested, string? pageToken, CancellationToken ct)
+    {
+        var pageSize = PagingDefaults.Resolve(pageSizeRequested);
+
+        if (!await db.Stokvels.AnyAsync(s => s.Id == stokvelId, ct)) return null;
+
+        var context = PageTokenCodec.ContextOf("rotation", stokvelId);
+
+        var query = db.StokvelMembers.AsNoTracking().Where(m => m.StokvelId == stokvelId);
+
+        if (!string.IsNullOrEmpty(pageToken))
+        {
+            var cursor = PageTokenCodec.Decode(pageToken, context);
+            if (!int.TryParse(cursor.LastValue, out var lastPosition))
+                throw new ApiBadRequestException("pageToken is invalid.");
+            query = query.Where(m => m.RotationPosition > lastPosition);   // keyset
+        }
+
+        var rows = await query
+            .OrderBy(m => m.RotationPosition)
+            .Take(pageSize + 1)
+            .Select(m => new
+            {
+                m.RotationPosition,
+                m.User.Id,
+                m.User.FullName,
+                m.User.Email,
+                m.User.CreatedAtUtc
+            })
+            .ToListAsync(ct);
+
+        var hasMore = rows.Count > pageSize;
+        var page = rows.Take(pageSize).ToList();
+
+        var next = hasMore
+            ? PageTokenCodec.Encode(new PageCursor(context, page[^1].RotationPosition.ToString(), Guid.Empty))
+            : "";
+
+        var items = page.Select(r => new UserResponse(r.Id, r.FullName, r.Email, r.CreatedAtUtc)).ToList();
+        return new PagedResponse<UserResponse>(items, next);
+    }
+}
+
+===== Services/PayoutServices.cs =====
+using Microsoft.EntityFrameworkCore;
+using RondiTrack.Data;
+using RondiTrack.Domain;
+using RondiTrack.Dtos;
+
+namespace RondiTrack.Services;
+
+// Lets a test force a failure between the two writes. Does nothing in production.
+public interface IPayoutFaultHook
+{
+    void AfterPayoutInserted();
+}
+
+public sealed class NoOpPayoutFaultHook : IPayoutFaultHook
+{
+    public void AfterPayoutInserted() { }
+}
+
+public interface IPayoutService
+{
+    Task<PayoutResponse> ProcessNextPayoutAsync(Guid stokvelId, Guid cycleId, CancellationToken ct = default);
+}
+
+// EDIT 5.2: now also receives IStokvelMemberRepository (members are no longer read straight from the DbContext)
+public sealed class PayoutService(
+    RondiTrackDbContext db,
+    IPayoutFaultHook faultHook,
+    IStokvelMemberRepository members) : IPayoutService
+{
+    public async Task<PayoutResponse> ProcessNextPayoutAsync(
+        Guid stokvelId, Guid cycleId, CancellationToken ct = default)
+    {
+        // Retry-on-failure is enabled, so a manual transaction must run inside the execution strategy.
+        var strategy = db.Database.CreateExecutionStrategy();
+
+        return await strategy.ExecuteAsync(async () =>
+        {
+            db.ChangeTracker.Clear(); // clean slate if the strategy retries
+
+            await using var tx = await db.Database.BeginTransactionAsync(ct);
+            try
+            {
+                // Stays TRACKED on purpose, because we change its status and save below
+                var cycle = await db.ContributionCycles
+                    .FirstOrDefaultAsync(c => c.Id == cycleId && c.StokvelId == stokvelId, ct)
+                    ?? throw new DomainNotFoundException(
+                        $"Cycle {cycleId} was not found for stokvel {stokvelId}.");
+
+                if (cycle.Status != CycleStatus.Open)
+                    throw new DomainConflictException("This cycle has already been paid out.");
+
+                // Payouts now record the recipient's UserId (not a StokvelMember.Id)
+                var paidUserIds = await db.Payouts
+                    .Where(p => p.StokvelId == stokvelId)
+                    .Select(p => p.RecipientUserId)
+                    .ToListAsync(ct);
+
+                // EDIT 5.2: read-only (untracked) through the dedicated repository, already ordered by rotation
+                var next = (await members.GetByStokvelAsync(stokvelId))
+                    .FirstOrDefault(m => !paidUserIds.Contains(m.UserId))
+                    ?? throw new DomainConflictException("Every member has already been paid in this rotation.");
+
+                var total = await db.Contributions
+                    .Where(c => c.CycleId == cycleId)
+                    .SumAsync(c => c.Amount, ct);
+
+                if (total <= 0)
+                    throw new DomainConflictException("No contributions have been recorded for this cycle.");
+
+                var payout = new Payout(stokvelId, cycleId, next.UserId, total);   // EDIT 5.2: next.UserId
+                db.Payouts.Add(payout);
+                await db.SaveChangesAsync(ct);          // write 1: the payout
+
+                faultHook.AfterPayoutInserted();        // a test can throw here
+
+                cycle.MarkPaidOut();
+                await db.SaveChangesAsync(ct);          // write 2: the cycle status
+
+                await tx.CommitAsync(ct);
+
+                return new PayoutResponse(
+                    payout.Id, payout.StokvelId, payout.CycleId,
+                    payout.RecipientUserId, payout.Amount, payout.PaidAtUtc);   // EDIT 5.2
+            }
+            catch
+            {
+                await tx.RollbackAsync(ct);
+                throw;
+            }
+        });
+    }
+}
+
+===== Services/StokvelMembershipService.cs =====
+using RondiTrack.Data;
+using RondiTrack.Domain;
+
+namespace RondiTrack.Services;
+
+public interface IStokvelMembershipService
+{
+    Task<User> AddMemberAsync(Guid stokvelId, Guid userId);
+    Task RemoveMemberAsync(Guid stokvelId, Guid userId);
+}
+
+public sealed class StokvelMembershipService(IStokvelRepository stokvels, IUserRepository users)
+    : IStokvelMembershipService
+{
+    public async Task<User> AddMemberAsync(Guid stokvelId, Guid userId)
+    {
+        var stokvel = await stokvels.GetByIdAsync(stokvelId)
+            ?? throw new DomainNotFoundException($"Stokvel {stokvelId} was not found.");
+
+        var user = await users.GetByIdAsync(userId)
+            ?? throw new DomainReferenceException($"User {userId} does not exist.");
+
+        stokvel.AddMember(user); // still Stokvel's own rule: no duplicates, no exceeding capacity
+        await stokvels.UpdateAsync(stokvel);
+        return user;
+    }
+
+    public async Task RemoveMemberAsync(Guid stokvelId, Guid userId)
+    {
+        var stokvel = await stokvels.GetByIdAsync(stokvelId)
+            ?? throw new DomainNotFoundException($"Stokvel {stokvelId} was not found.");
+
+        if (!stokvel.RemoveMember(userId))
+            throw new DomainNotFoundException($"User {userId} is not a member of this stokvel.");
+
+        await stokvels.UpdateAsync(stokvel);
+    }
+}
+
+===== Validation/ValidationFilter.cs =====
+using FluentValidation;
+using Microsoft.AspNetCore.Mvc.Filters;
+
+namespace RondiTrack.Validation;
+
+public sealed class ValidationFilter(IServiceProvider serviceProvider) : IAsyncActionFilter
+{
+    public async Task OnActionExecutionAsync(ActionExecutingContext context, ActionExecutionDelegate next)
+    {
+        foreach (var arg in context.ActionArguments.Values)
+        {
+            if (arg is null) continue;
+
+            var validatorType = typeof(IValidator<>).MakeGenericType(arg.GetType());
+            if (serviceProvider.GetService(validatorType) is IValidator validator)
+            {
+                var validationContext = new ValidationContext<object>(arg);
+                var result = await validator.ValidateAsync(validationContext);
+                if (!result.IsValid)
+                    throw new ValidationException(result.Errors);
+            }
+        }
+
+        await next();
+    }
+}
+
+===== Validators/AddMemberRequestValidator.cs =====
+using FluentValidation;
+using RondiTrack.Dtos;
+
+namespace RondiTrack.Validators;
+
+public sealed class AddMemberRequestValidator : AbstractValidator<AddMemberRequest>
+{
+    public AddMemberRequestValidator()
+    {
+        RuleFor(x => x.UserId).NotEmpty();
+    }
+}
+
+===== Validators/ContributionCycleRequestValidator.cs =====
+using FluentValidation;
+using RondiTrack.Dtos;
+
+namespace RondiTrack.Validators;
+
+public sealed class ContributionCycleRequestValidator : AbstractValidator<ContributionCycleRequest>
+{
+    public ContributionCycleRequestValidator()
+    {
+        RuleFor(x => x.CycleNumber).GreaterThan(0);
+        RuleFor(x => x.TargetAmount).GreaterThan(0);
+    }
+}
+
+===== Validators/ContributionRequestValidator.cs =====
+using FluentValidation;
+using RondiTrack.Dtos;
+
+namespace RondiTrack.Validators;
+
+public sealed class ContributionRequestValidator : AbstractValidator<ContributionRequest>
+{
+    public ContributionRequestValidator()
+    {
+        RuleFor(x => x.UserId).NotEmpty();
+        RuleFor(x => x.CycleId).NotEmpty();
+        RuleFor(x => x.Amount).GreaterThan(0);
+    }
+}
+
+===== Validators/StokvelRequestValidator.cs =====
+using FluentValidation;
+using RondiTrack.Dtos;
+
+namespace RondiTrack.Validators;
+
+public sealed class StokvelRequestValidator : AbstractValidator<StokvelRequest>
+{
+    public StokvelRequestValidator()
+    {
+        RuleFor(x => x.Name).NotEmpty().MaximumLength(100);
+        RuleFor(x => x.ContributionAmount).GreaterThan(0);
+        RuleFor(x => x.Frequency).IsInEnum();
+        RuleFor(x => x.MaxMembers).InclusiveBetween(2, 50);
+    }
+}
+
+===== Validators/UserRequestValidators.cs =====
+using FluentValidation;
+using RondiTrack.Dtos;
+
+namespace RondiTrack.Validators;
+
+public sealed class UserRequestValidator : AbstractValidator<UserRequest>
+{
+    public UserRequestValidator()
+    {
+        RuleFor(x => x.FullName).NotEmpty().MaximumLength(100);
+        RuleFor(x => x.Email).NotEmpty().EmailAddress();
+    }
+}
+
+===== appsettings.Development.json =====
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning",
+      "Microsoft.EntityFrameworkCore.Database.Command": "Information"
+    }
+  }
+}
+
+===== appsettings.json =====
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning"
+    }
+  },
+  "AllowedHosts": "*"
+}
