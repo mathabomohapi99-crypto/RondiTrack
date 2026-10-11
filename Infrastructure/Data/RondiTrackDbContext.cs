@@ -13,6 +13,7 @@ public class RondiTrackDbContext : DbContext
     public DbSet<ContributionCycle> ContributionCycles => Set<ContributionCycle>();
     public DbSet<Contribution> Contributions => Set<Contribution>();
     public DbSet<Payout> Payouts => Set<Payout>();
+    public DbSet<RefreshToken> RefreshTokens => Set<RefreshToken>();   // NEW 6.1
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -21,6 +22,8 @@ public class RondiTrackDbContext : DbContext
             e.HasKey(u => u.Id);
             e.Property(u => u.FullName).HasMaxLength(User.MaxNameLength).IsRequired();
             e.Property(u => u.Email).HasMaxLength(320).IsRequired();
+            e.Property(u => u.PasswordHash).HasMaxLength(500);   // NEW 6.1: nullable on purpose
+            e.HasIndex(u => u.Email).IsUnique();                 // NEW 6.1: database-level "one account per email"
             e.Property(u => u.Version).IsRowVersion();   // ADDED 5.3: xmin concurrency token
         });
 
@@ -113,6 +116,21 @@ public class RondiTrackDbContext : DbContext
              .WithMany()
              .HasForeignKey(p => new { p.RecipientUserId, p.StokvelId })
              .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        // NEW 6.1: refresh tokens
+        b.Entity<RefreshToken>(e =>
+        {
+            e.HasKey(t => t.Id);
+            e.Property(t => t.TokenHash).HasMaxLength(64).IsRequired();   // SHA-256 as 64 hex characters
+            e.HasIndex(t => t.TokenHash).IsUnique();                      // lookup by hash, and no duplicates
+            e.HasIndex(t => t.FamilyId);                                  // revoke a whole family fast
+
+            // deleting a user also deletes their sessions (no navigation property needed)
+            e.HasOne<User>()
+             .WithMany()
+             .HasForeignKey(t => t.UserId)
+             .OnDelete(DeleteBehavior.Cascade);
         });
     }
 }
