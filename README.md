@@ -668,3 +668,133 @@ No Singleton depends on a DbContext, so no registration needed fixing.
 ## What went wrong during the split
 
 After moving the code into Domain, Infrastructure and API, the API project had lost its project references, so Domain types and the DbContext were not found. I added the ProjectReference lines. I added explicit Microsoft.EntityFrameworkCore and .Relational references (10.0.12) to API.csproj to avoid CS1705, and Microsoft.EntityFrameworkCore.Design with PrivateAssets=all so `dotnet ef` works from the API startup project. Several members were `internal` (the User and Stokvel constructors, LoadMembers, and SeedData), which stopped working across projects, so I made them public. The repository interfaces were inside the Data files, so I moved them to Domain. ContributionQueries and IdempotencyStore return API DTOs, so they went to the API project. For the tests I used UseSetting with the key ConnectionStrings:RondiTrack, migrated the container database before the app starts because Program.cs seeds data in Development, and changed TestDb and PayoutTransactionTests so they no longer read the dev connection string from user-secrets. No assertions were changed.
+
+
+
+
+
+# Assignment 6.1: Login, Tokens and Stokvel Permissions
+
+## 1. Tokens: how long they live and what is inside
+- **Access token:** a JWT that lasts **10 minutes**. The app refuses to start if I set it above 15.
+- **Refresh token:** 32 random bytes (not a JWT). It lasts **7 days**. Only its SHA-256 hash is saved in the database.
+- **ClockSkew: 30 seconds.** The default is 5 minutes, which would quietly turn my 10 minute token into a 15 minute one. I run one server, so the clocks barely drift and 30 seconds is plenty.
+
+What is inside the access token (plus the usual `iss`, `aud`, `exp`, `nbf`, `iat`):
+
+| Claim | Why it is fine if it is up to 10 minutes out of date |
+|---|---|
+| `sub` (user id) | A user's id never changes. |
+| `jti` | Just a random id for the token. It says nothing about the user. |
+| `role = PlatformAdmin` (only for platform admins) | It is a rare, platform-wide flag. If someone loses it, they keep it for 10 minutes at most. I accept that for a support role. |
+
+There is **no stokvel role** in the token (see section 6). There is also no email or name, so a leaked token shows nothing personal.
+
+## 2. The refresh cookie and where to keep tokens
+The cookie is called `rondi_refresh`. Its settings:
+- **HttpOnly:** JavaScript cannot read it, so a script injected into the page cannot steal it.
+- **Secure:** the browser only sends it over HTTPS.
+- **SameSite=Strict:** the browser does not send it from other websites, which stops CSRF on `/refresh` and `/logout`. This works because the frontend and API are on the same site. If they were on different sites, I would need `SameSite=None` plus another CSRF protection.
+- **Path=/api/auth:** it is only sent to the auth endpoints, not with every request, so it is exposed as little as possible.
+- **Expires:** the same 7 days as the token.
+
+The refresh token is **never in a response body**. A test checks this.
+
+**Advice for the frontend team**
+- Keep the **access token in memory only** (a normal JavaScript variable). When the page reloads, call `POST /api/auth/refresh` with `credentials: "include"` to get a new one. Never touch the refresh token. The browser looks after the cookie.
+- **If either token goes into `localStorage`, we lose protection from XSS.** Any script that gets into the page (a bad npm package, a weak widget) can read `localStorage` and send the tokens away. A stolen refresh token is a 7-day login that keeps working after the user closes the tab. A HttpOnly cookie cannot be read by scripts at all. An access token in `localStorage` also gains nothing, because memory plus refresh already does the job.
+
+## 3. How reuse detection works
+Every login starts a **family** of refresh tokens (one `FamilyId`). Each time you refresh, the old token is marked as used and a new one is made in the same family.
+
+If someone sends a token that was already used, it means a copy was probably stolen. The server then **revokes every token in that family** and returns 401. Marking a token as used is one single database `UPDATE ... WHERE UsedAtUtc IS NULL`, so two refreshes at the same moment cannot both win. The slower one counts as reuse.
+
+**What the real user sees:** if the thief refreshed first, the user's next refresh fails with 401 and they log in again. If the user refreshed first, the thief's try fails and the user's newer token dies too. Either way the stolen session is dead, and the user only pays with one extra login.
+
+## 4. Who can do what (status codes)
+"Officer" means Treasurer or Admin (the chairperson) **of that stokvel**. Anything without a valid token gets 401.
+
+| Endpoint | Non-member | Member | Officer | Platform admin | Tested? |
+|---|---|---|---|---|---|
+| GET /api/stokvels | 403 | 403 | 403 | 200 | no |
+| POST /api/stokvels | 201 | 201 | 201 | 201 | old tests |
+| GET /api/stokvels/{id} | 404 | 200 | 200 | 200 | yes |
+| PUT /api/stokvels/{id} | 404 | 403 | 200 | 200 | old tests (admin) |
+| DELETE /api/stokvels/{id} | 404 | 403 | 204 | 204 | no |
+| GET .../members and .../members/{userId} | 404 | 200 | 200 | 200 | old tests (admin) |
+| POST .../members | 404 | 403 | 201 | 201 | old tests (admin) |
+| DELETE .../members/{userId} | 404 | 403 | 204 | 204 | no |
+| POST .../contributions (own) | 404 | 201 | 201 | 201 | yes |
+| POST .../contributions (someone else's) | 404 | 403 | 201 | 201 | yes |
+| GET .../cycles, .../cycles/{id}, .../contributions | 404 | 200 | 200 | 200 | yes |
+| POST .../cycles (open a cycle) | 404 | 403 | 201 | 201 | yes |
+| PUT / DELETE .../cycles/{id} | 404 | 403 | 200 / 204 | 200 / 204 | no |
+| POST .../cycles/{cycleId}/payouts | 404 | 403 | 201 | 201 | yes |
+| GET /api/users, POST /api/users | 403 | 403 | 403 | 200 / 201 | old tests (admin) |
+| GET / PUT / DELETE /api/users/{id} | 403 (not you) | 403 (not you) | 403 (not you) | 200 / 200 / 204 | yes |
+| POST /api/auth/*, OpenAPI, Scalar | open | open | open | open | yes |
+
+## 5. Why 404 for non-members and 403 for members without the role
+- A **non-member** should not even know the stokvel exists. A 403 would say "it exists, but you can't come in", which tells an outsider that a private group is real. So they get the exact same 404 and message as for an id that does not exist. A test compares the two.
+- A **member without the role** already knows the stokvel exists because they are in it. A 404 would hide nothing and only confuse them. The honest answer is 403: you are in, but you are not allowed to do this.
+
+## 6. Why the stokvel role is checked in the database, not kept in the token
+A token is a snapshot. It stays true until it expires, even if the facts change. Imagine a chairperson removes a treasurer at 10:00. If the role was in a token issued at 09:58, that person could still process a payout at 10:04.
+
+Also, one person can be Treasurer in one stokvel and just a Member in another. One role claim cannot say that.
+
+So `StokvelAccessHandler` reads the person's row in `StokvelMembers` for that stokvel on **every request**. Changes work straight away. The test `Removed_Member_With_A_Still_Valid_Token_Is_Refused_At_Once` proves it: the same token gets 200, then 404 after the membership row is deleted.
+
+## 7. Role check vs policy check, using my own code
+- **Role check (used once):** `[Authorize(Roles = AuthConstants.PlatformAdminRole)]` on `GET /api/stokvels`. It only looks at a claim already in the token.
+- **Policy check (everywhere else):** for example `[RequireStokvelOfficer]`, which runs `StokvelAccessHandler` and asks the database.
+
+If the rule changed:
+- *"Support staff may also list stokvels."* With a role check I change the attribute on that endpoint and add a new claim in `TokenService`. Easy, but the rule is spread across two places.
+- *"Only the Admin may delete a stokvel."* With a policy I add one access level, one case in the handler and one policy line. Controllers and tokens stay the same.
+- *"Only if the stokvel has no open cycle."* A role check cannot do this at all. A handler can, because it can run any code and read the database.
+
+Simple rule: roles are good for simple facts in the token. Policies are good when the answer depends on the thing being touched or on current data.
+
+## 8. Log lines (no secrets)
+These are real lines from the test run (a register, a login, a refresh, a replay, and a failed login):
+```text
+info: RondiTrack.Auth.AuthService[0]
+      User dfd87caa-e0e2-4b81-94ab-dfc01272b314 registered
+info: RondiTrack.Auth.AuthService[0]
+      Login succeeded for user dfd87caa-e0e2-4b81-94ab-dfc01272b314
+info: RondiTrack.Auth.AuthService[0]
+      Refresh token rotated for user dfd87caa-e0e2-4b81-94ab-dfc01272b314
+warn: RondiTrack.Auth.AuthService[0]
+      Refresh token reuse detected for user dfd87caa-e0e2-4b81-94ab-dfc01272b314. Session a51421a9-44b8-409c-95b9-631d2b2413c4 revoked
+warn: RondiTrack.Auth.AuthService[0]
+      Login failed
+```
+No password, token or cookie value appears. The code only logs user ids and session ids, never an email, password or token. I also turned off EF sensitive-data logging and set SQL logging to `Warning`, so no parameter values reach the log.
+
+## 9. Secrets
+- The signing key is in user-secrets (`Jwt:SigningKey`) and is 64 characters (48 random bytes), well over the 32 byte minimum.
+- `appsettings.json` only has the issuer, audience and lifetimes.
+- If the key is missing or too short, the app stops at startup with a message that includes the exact command to fix it.
+- The test factory makes a new random key every run, so no key is ever saved in a test file.
+
+## 10. How the old tests log in
+`PostgresApiFactory` gives every client a **minted** token for a platform admin. The app's own `TokenService` makes it, with the same key and the same checks as a real token. I chose minting over logging in because the old tests are about stokvels, not login. Logging in for every client would add a password hash and extra requests to every test. No old assertion was changed.
+
+The new tests use `CreateClientFor(userId)` (a normal user) and `CreateAnonymousClient()` (no token).
+
+## 11. Test result
+```text
+Test summary: total: 60, failed: 0, succeeded: 60, skipped: 0, duration: 61.8s
+```
+I could not stop the PostgreSQL service because my Windows account has no permission to control it. So I removed the dev connection string from user-secrets for this run, which meant the tests had no way to reach the dev database. All 60 passed using only the Testcontainers database. I put the secret back afterwards.
+
+## 12. Gaps I did not close yet
+- **Platform admin passes every stokvel check.** I needed this so the old tests keep passing. It means the admin claim is checked in two places (the one `Roles=` attribute and the stokvel handler). Admin access is not logged yet.
+- **Creating a stokvel does not make the creator a member.** That would break my 5.3 "empty members list" test. There is also still no endpoint to change a member's role (the 5.2 gap), so treasurers are set in the database or by a platform admin.
+- **Access tokens cannot be cancelled.** After logout or reuse detection, an access token that was already issued works for up to 10 minutes.
+- **No protection against password guessing** (no rate limit or lockout).
+- **Idempotency keys are still in memory** and are shared by all users (the 5.3 gap).
+- **Register returns 409 for an existing email**, because the assignment asks for it. That tells a stranger the email has an account. A real product would verify emails instead.
+- **Users made through `POST /api/users`** (platform admin only) have no password and cannot log in.
+- **POPIA to check:** the 409 message from `POST /api/users` includes the email address, and failed-request warnings log full stack traces.
