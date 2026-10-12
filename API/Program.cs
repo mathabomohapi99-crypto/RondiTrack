@@ -49,7 +49,7 @@ builder.Services.AddOpenTelemetry()
         t.AddSource(RondiTelemetry.ActivitySourceName);   // our payout.process span
         t.AddAspNetCoreInstrumentation(o =>
             o.Filter = ctx => !ctx.Request.Path.StartsWithSegments("/health"));   // probes are not traced
-        t.AddNpgsql();                                     // one span per SQL command
+        t.AddSource("Npgsql");                             // Npgsql's built-in span source: one span per SQL command
         if (otlpEnabled) t.AddOtlpExporter();              // send traces only if an endpoint is set
     })
     .WithMetrics(m =>
