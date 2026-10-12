@@ -46,7 +46,7 @@ public class UsersController(IUserRepository users, IStokvelRepository stokvels)
         var user = new User(request.FullName, request.Email);
 
         if (await users.EmailExistsAsync(user.Email))
-            throw new DomainConflictException($"A user with email '{user.Email}' already exists.");
+            throw new DomainConflictException("A user with this email already exists.");   // CHANGED 6.2: no email in the response
 
         await users.AddAsync(user);
 
@@ -71,7 +71,7 @@ public class UsersController(IUserRepository users, IStokvelRepository stokvels)
         var user = await users.GetByIdAsync(id) ?? throw new DomainNotFoundException($"User {id} was not found.");
 
         if (await users.EmailExistsAsync(request.Email, excludingUserId: id))
-            throw new DomainConflictException($"A user with email '{request.Email.Trim()}' already exists.");
+            throw new DomainConflictException("A user with this email already exists.");   // CHANGED 6.2: no email in the response
 
         user.UpdateDetails(request.FullName, request.Email);
         user.SetExpectedVersion(expectedVersion);   // ADDED 5.3: use the version the CLIENT saw

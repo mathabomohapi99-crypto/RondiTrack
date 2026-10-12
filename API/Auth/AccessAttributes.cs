@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc.Filters;
+using RondiTrack.Telemetry;   // NEW 6.2
 
 namespace RondiTrack.Auth;
 
@@ -35,6 +36,9 @@ public sealed class RequireUserSelfAttribute : Attribute, IAsyncAuthorizationFil
 
         var result = await authorization.AuthorizeAsync(context.HttpContext.User, new UserResource(userId), Policies.UserSelf);
         if (!result.Succeeded)
+        {
+            RondiMetrics.AuthorizationRefused(RefusalResults.Forbidden);   // NEW 6.2: count the refusal
             throw new ForbiddenException("You can only access your own account.");   // 403 even if the id does not exist
+        }
     }
 }
