@@ -7,6 +7,7 @@ using RondiTrack.Api.Common.Paging;
 using RondiTrack.Auth;
 using RondiTrack.Common;
 using RondiTrack.Domain;
+using RondiTrack.Telemetry;
 using System.Text.Json;
 
 namespace RondiTrack.Errors;
@@ -15,11 +16,11 @@ public sealed class RondiExceptionHandler(ILogger<RondiExceptionHandler> logger)
 {
     public async ValueTask<bool> TryHandleAsync(HttpContext httpContext, Exception exception, CancellationToken cancellationToken)
     {
-        var correlationId = httpContext.TraceIdentifier;
+        var correlationId = CorrelationId.For(httpContext);   // CHANGED 6.2: the W3C trace id, not TraceIdentifier
 
         var status = StatusCodes.Status500InternalServerError;
         var title = "Internal Server Error";
-        var detail = "An unexpected error occurred.";
+        var detail = "An unexpected error occurred.";   // the ONLY text a client sees for a 5xx
 
         if (exception is ValidationException vex)
         {
@@ -105,9 +106,18 @@ public sealed class RondiExceptionHandler(ILogger<RondiExceptionHandler> logger)
             detail = "That record already exists (it would break a uniqueness rule).";
         }
 
-        // CHANGED 6.1: expected 4xx answers are warnings, only real failures (5xx) are errors
-        logger.Log(status >= 500 ? LogLevel.Error : LogLevel.Warning, exception,
-            "Request failed with status {Status}. CorrelationId: {CorrelationId}", status, correlationId);
+        // CHANGED 6.2 (POPIA): a 5xx is a real failure, so it gets the full exception at Error.
+        if (status >= 500)
+        {
+            logger.LogError(exception, "Request failed with status {Status}. CorrelationId: {CorrelationId}",
+                status, correlationId);
+        }
+        else
+        {
+            // CHANGED 6.2 (POPIA): a 4xx is an expected answer. Log the exception TYPE only, never its message or stack.
+            logger.LogInformation("Request rejected with status {Status} ({ExceptionType}). CorrelationId: {CorrelationId}",
+                status, exception.GetType().Name, correlationId);
+        }
 
         var problemDetails = new ProblemDetails
         {
@@ -115,7 +125,7 @@ public sealed class RondiExceptionHandler(ILogger<RondiExceptionHandler> logger)
             Title = title,
             Detail = detail
         };
-        problemDetails.Extensions["correlationId"] = correlationId;
+        problemDetails.Extensions["correlationId"] = correlationId;   // same id as the log line and the trace
 
         httpContext.Response.StatusCode = status;
         httpContext.Response.ContentType = "application/problem+json";
