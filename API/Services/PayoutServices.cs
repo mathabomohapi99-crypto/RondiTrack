@@ -1,7 +1,9 @@
+using System.Diagnostics;
 using Microsoft.EntityFrameworkCore;
 using RondiTrack.Data;
 using RondiTrack.Domain;
 using RondiTrack.Dtos;
+using RondiTrack.Telemetry;
 
 namespace RondiTrack.Services;
 
@@ -27,8 +29,37 @@ public sealed class PayoutService(
     IPayoutFaultHook faultHook,
     IStokvelMemberRepository members) : IPayoutService
 {
+    // NEW 6.2: the public method only adds the span and the metric. The money logic is unchanged (below).
     public async Task<PayoutResponse> ProcessNextPayoutAsync(
         Guid stokvelId, Guid cycleId, CancellationToken ct = default)
+    {
+        // our own span, named for the business operation. The SQL spans start INSIDE it, so they nest under it.
+        using var activity = RondiTelemetry.Source.StartActivity("payout.process");
+
+        try
+        {
+            var result = await ProcessAsync(stokvelId, cycleId, activity, ct);
+
+            activity?.SetTag("payout.outcome", PayoutOutcomes.Success);   // safe: fixed label
+            RondiMetrics.PayoutProcessed(PayoutOutcomes.Success);         // counter, tagged by outcome
+            return result;
+        }
+        catch (Exception ex)
+        {
+            // a rule said no = "rejected"; anything else (database, bug) = "error"
+            var outcome = ex is DomainException ? PayoutOutcomes.Rejected : PayoutOutcomes.Error;
+
+            activity?.SetTag("payout.outcome", outcome);
+            activity?.SetTag("error.type", ex.GetType().Name);            // class name only, never the message
+            activity?.SetStatus(ActivityStatusCode.Error);                // a failed payout = error span (no description on purpose)
+            RondiMetrics.PayoutProcessed(outcome);
+            throw;                                                        // the exception handler still turns it into a response
+        }
+    }
+
+    // The original 5.x logic, moved here unchanged except for the one cycle-number tag
+    private async Task<PayoutResponse> ProcessAsync(
+        Guid stokvelId, Guid cycleId, Activity? activity, CancellationToken ct)
     {
         // Retry-on-failure is enabled, so a manual transaction must run inside the execution strategy.
         var strategy = db.Database.CreateExecutionStrategy();
@@ -45,6 +76,8 @@ public sealed class PayoutService(
                     .FirstOrDefaultAsync(c => c.Id == cycleId && c.StokvelId == stokvelId, ct)
                     ?? throw new DomainNotFoundException(
                         $"Cycle {cycleId} was not found for stokvel {stokvelId}.");
+
+                activity?.SetTag("payout.cycle_number", cycle.CycleNumber);   // safe: a sequence number (1, 2, 3...)
 
                 if (cycle.Status != CycleStatus.Open)
                     throw new DomainConflictException("This cycle has already been paid out.");
