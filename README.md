@@ -798,3 +798,103 @@ I could not stop the PostgreSQL service because my Windows account has no permis
 - **Register returns 409 for an existing email**, because the assignment asks for it. That tells a stranger the email has an account. A real product would verify emails instead.
 - **Users made through `POST /api/users`** (platform admin only) have no password and cannot log in.
 - **POPIA to check:** the 409 message from `POST /api/users` includes the email address, and failed-request warnings log full stack traces.
+
+
+# Assignment 6.2: Observability & POPIA-Compliant Telemetry
+
+## 1. Run the Aspire dashboard (laptop only, never deploy it)
+The dashboard runs without a login, so it is bound to localhost only.
+```powershell
+docker run --rm -d -p 127.0.0.1:18888:18888 -p 127.0.0.1:4317:18889 --name aspire-dashboard `
+  -e ASPIRE_DASHBOARD_UNSECURED_ALLOW_ANONYMOUS=true mcr.microsoft.com/dotnet/aspire-dashboard:latest
+$env:OTEL_EXPORTER_OTLP_ENDPOINT = "http://localhost:4317"
+dotnet run --project API
+```
+Open http://localhost:18888. Without `OTEL_EXPORTER_OTLP_ENDPOINT` no exporter is registered, so tests and CI never need the dashboard.
+Service name: `ronditrack-api`. Traces cover incoming requests (not `/health`) and Npgsql commands.
+
+## 2. Payout trace
+I could not run the Aspire dashboard on my laptop because Docker would not start for it, so I do not have a screenshot of the payout trace. By design, `payout.process` is created while the payout request is being handled, so it is a child of the incoming request span, and the Npgsql SQL command spans created during the payout appear beneath it. The span's tags and the metrics are checked by `TelemetryTests.cs` (section 12), which does not need the dashboard.
+
+To see the trace, run the command in section 1, trigger one payout, and open Traces at http://localhost:18888.
+
+## 3. SQL logging
+Each SQL command is logged once, by the EF `Database.Command` category. There is no `LogTo`, and sensitive-data logging appears nowhere.
+- Development: `Information`. I want to see SQL while building, and parameter values are masked as `?`.
+- Production (appsettings.json): `Warning`. Every command is already a trace span, so logging it again doubles volume, and SQL text exposes the schema in a longer-lived store. Warning still shows slow or failed commands.
+- `ExceptionHandlerMiddleware` is set to `None` because `RondiExceptionHandler` is the single place that logs a failed request. The framework's line would duplicate it.
+
+## 4. One correlation ID
+`correlationId` is the W3C trace ID (`CorrelationId.For`). It appears on exception-handler responses, the 401 and 403 from `ProblemAuthorizationResultHandler`, and the non-member 404. If the caller sends `traceparent`, their trace ID is used. The same ID is in the `CorrelationId` property of the log line and on the trace.
+
+## 5. Span: `payout.process`
+| Tag | Values | Why it is safe | What support gains |
+|---|---|---|---|
+| `payout.cycle_number` | 1, 2, 3... | A counter. It names no person and holds no money. | Which cycle's payout failed. |
+| `payout.outcome` | success / rejected / error | Fixed labels. | Filter failed payouts, and tell a refused rule from a fault. |
+| `error.type` (failures only) | exception class name | The type only, never the message. | Rule refusal vs database fault. |
+
+A failed payout sets the span status to Error. I do not record exception events, because messages and stacks can contain data.
+
+## 6. Metrics
+| Metric | Tag | Values | Max distinct values |
+|---|---|---|---|
+| ronditrack.contributions.recorded | none | n/a | 1 series |
+| ronditrack.payouts.processed | outcome | success, rejected, error | 3 |
+| ronditrack.authorization.refusals | result | not_found, forbidden | 2 |
+
+That is 6 series in total, and no tag depends on a user, stokvel or amount.
+
+**Chairperson's question:** per-stokvel counts need a stokvel-ID tag, which creates one series per stokvel and has no upper bound. Metrics are also aggregated and short-lived, not an exact permanent record. The `Payouts` table is the system of record, so `SELECT COUNT(*) FROM "Payouts" WHERE "StokvelId" = @id AND "PaidAtUtc" >= @startOfYear` is exact, permanent and access-controlled.
+
+## 7. POPIA log audit
+| Location | What it can contain | Personal / financial? | What I changed |
+|---|---|---|---|
+| AuthService register `User {UserId} registered` | own user GUID | Pseudonymous ID only | none |
+| AuthService login failed | before: nothing. after: user GUID, or "no matching account" | Never the typed email | added GUID when the account exists (Warning kept: possible guessing) |
+| AuthService login succeeded / rotated / logged out | own user GUID | ID only | none |
+| AuthService refresh-token reuse (2 places) | user GUID + session GUID | IDs only | none (Warning, as required) |
+| RondiExceptionHandler, 4xx | before: full exception (message + stack) at Warning. after: status, exception type, trace ID | Messages could hold email, name, stokvel name | now Information, type only |
+| RondiExceptionHandler, 5xx | full exception at Error (required); client gets a generic detail + correlationId | May hold SQL text, no parameter values | unchanged log, response already generic |
+| ProblemAuthorizationResultHandler (new) | status, own user GUID or "anonymous", trace ID | ID only | new, Information |
+| StokvelAccess refusal (new) | result label, own user GUID | ID only, stokvel ID left out on purpose | new, Information (a spike shows in the metric) |
+| EF `Database.Command` | SQL text, values masked | Schema names only | Warning in production |
+| Framework ExceptionHandlerMiddleware | exception incl. message | Would duplicate our line | silenced |
+
+| Exception message | Can contain | Personal / financial? | Change |
+|---|---|---|---|
+| UsersController create/update conflict | before: the email | Personal | "A user with this email already exists." |
+| ContributionService "not a member" | before: full name + stokvel name | Personal | "That user is not a member of this stokvel." |
+| ContributionService "already contributed" | before: full name | Personal + financial history | "This member has already contributed for this cycle." |
+| Stokvel.AddMember (2), UpdateDetails | before: full name / stokvel name | Personal | generic text |
+| "Stokvel/Cycle/User {id} was not found" | GUIDs | Pseudonymous | none |
+| Validation, Auth, Payout, Contribution, ETag, paging messages | static text | No | none |
+| Startup messages (connection string, JWT key) | static, no values | No | none |
+| EF/Npgsql exceptions (5xx) | SQL text | Residual risk | logged server-side only, never in the response |
+
+## 8. Readiness timings (database stopped)
+I could not reliably block my local PostgreSQL while the app was running, so I do not have a trustworthy before/after comparison. The timeout still protects against a database that hangs instead of refusing connections: with retry-on-failure enabled (4 retries, up to 10 s apart), an uncapped probe would wait through the connect time plus the retries. With the 2 s cap, the probe is cancelled and reports Unhealthy.
+
+The `/health/live` check shows the process is up. `/health/ready` shows whether it can serve traffic. A stopped database should make readiness fail but not liveness, otherwise the platform would restart a healthy app in a loop. Responses are only `Healthy` or `Unhealthy`, with no check name, connection string or version.
+
+## 9. Log excerpt (login, payout, non-member 404)
+Taken from the test run console output. No email, password, token or amount appears.
+```
+info: RondiTrack.Auth.AuthService[0]
+      User a4440ca9-fc4f-449c-96de-063d4aa841c1 registered
+info: RondiTrack.Auth.AuthService[0]
+      Login succeeded for user a4440ca9-fc4f-449c-96de-063d4aa841c1
+
+info: RondiTrack.Auth.AuthService[0]
+      User 5f7345cc-cb60-4b34-9334-3b1dfb067d8c registered
+warn: RondiTrack.Auth.AuthService[0]
+      Login failed for user 5f7345cc-cb60-4b34-9334-3b1dfb067d8c
+info: RondiTrack.Errors.RondiExceptionHandler[0]
+      Request rejected with status 401 (InvalidCredentialsException). CorrelationId: 97bbb7e05f876f1ca3253aff3a847cd8
+
+warn: RondiTrack.Auth.AuthService[0]
+      Login failed: no matching account
+info: RondiTrack.Errors.RondiExceptionHandler[0]
+      Request rejected with status 401 (InvalidCredentialsException). CorrelationId: 53b03b591b4fee44a052cf2efc96b4e0
+
+info: RondiTrack.Auth.StokvelAccess[0]
