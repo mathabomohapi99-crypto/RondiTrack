@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Hosting;                           // IWebHostBuilder
 using Microsoft.AspNetCore.Mvc.Testing;                       // WebApplicationFactory
 using Microsoft.EntityFrameworkCore;                          // UseNpgsql, MigrateAsync
 using Microsoft.Extensions.DependencyInjection;               // GetRequiredService
+using Microsoft.Extensions.Logging;                           // NEW 6.2: needed for AddProvider
 using RondiTrack.Auth;                                        // ITokenService
 using RondiTrack.Data;                                        // RondiTrackDbContext
 using Testcontainers.PostgreSql;                              // the PostgreSQL container
@@ -20,6 +21,9 @@ public class PostgresApiFactory : WebApplicationFactory<Program>, IAsyncLifetime
 
     // NEW 6.1: a random signing key made fresh on every run. Nothing is committed.
     private readonly string _jwtKey = Convert.ToBase64String(RandomNumberGenerator.GetBytes(48));
+
+    // NEW 6.2: every log line the app writes during a test run ends up here
+    public CapturingLoggerProvider CapturedLogs { get; } = new();
 
     public async Task InitializeAsync()
     {
@@ -37,6 +41,8 @@ public class PostgresApiFactory : WebApplicationFactory<Program>, IAsyncLifetime
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
+        builder.ConfigureLogging(logging => logging.AddProvider(CapturedLogs));   // NEW 6.2: capture logs for the leak test
+
         // UseSetting (NOT ConfigureAppConfiguration) so Program.cs sees it at startup.
         // "RondiTrack" is the exact key your Program.cs reads.
         builder.UseSetting("ConnectionStrings:RondiTrack", _container.GetConnectionString());
