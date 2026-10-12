@@ -12,6 +12,11 @@
     <PackageReference Include="FluentValidation.DependencyInjectionExtensions" Version="12.1.1" /> <!-- AddValidatorsFromAssembly -->
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.12" /> <!-- NEW 6.1: JWT validation -->
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.3" /> <!-- OpenAPI -->
+    <PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks.EntityFrameworkCore" Version="10.0.12" />
+    <PackageReference Include="Npgsql.OpenTelemetry" Version="10.0.3" />
+    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.19.1" />
+    <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.19.1" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" Version="1.19.0" />
     <PackageReference Include="Scalar.AspNetCore" Version="2.17.7" /> <!-- API docs UI -->
 
     <!-- Fixes CS1705: same EF version as Infrastructure -->

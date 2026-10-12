@@ -3,13 +3,20 @@ using System.Text.Json.Serialization;
 using FluentValidation;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;   // NEW 6.2: HealthCheckOptions
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Diagnostics.HealthChecks;   // NEW 6.2: HealthStatus, HealthCheckServiceOptions
 using Microsoft.IdentityModel.Tokens;
+using OpenTelemetry.Logs;                              // NEW 6.2: OTLP exporter for logs
+using OpenTelemetry.Metrics;                           // NEW 6.2: AddMeter + OTLP exporter for metrics
+using OpenTelemetry.Resources;                         // NEW 6.2: AddService (service name)
+using OpenTelemetry.Trace;                             // NEW 6.2: AddSource, AddNpgsql, OTLP exporter for traces
 using RondiTrack.Auth;
 using RondiTrack.Data;
 using RondiTrack.Errors;
 using RondiTrack.Services;
+using RondiTrack.Telemetry;                            // NEW 6.2
 using RondiTrack.Validation;
 using Scalar.AspNetCore;
 
@@ -20,10 +27,47 @@ builder.Services
     .AddJsonOptions(o => o.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 
 builder.Services.AddOpenApi();
-builder.Services.AddProblemDetails();
+
+// CHANGED 6.2: framework-made problem responses (e.g. automatic 400s) also get the trace id as correlationId
+builder.Services.AddProblemDetails(o =>
+    o.CustomizeProblemDetails = ctx =>
+        ctx.ProblemDetails.Extensions["correlationId"] = CorrelationId.For(ctx.HttpContext));
+
 builder.Services.AddExceptionHandler<RondiExceptionHandler>();
 
 builder.Services.AddValidatorsFromAssemblyContaining<Program>();
+
+// ---------- NEW 6.2: OpenTelemetry ----------
+// The exporter is only added when OTEL_EXPORTER_OTLP_ENDPOINT is set, so tests and CI never need a dashboard
+var otlpEnabled = !string.IsNullOrWhiteSpace(builder.Configuration["OTEL_EXPORTER_OTLP_ENDPOINT"]);
+var resource = ResourceBuilder.CreateDefault().AddService(RondiTelemetry.ServiceName);   // service name for all signals
+
+builder.Services.AddOpenTelemetry()
+    .ConfigureResource(r => r.AddService(RondiTelemetry.ServiceName))
+    .WithTracing(t =>
+    {
+        t.AddSource(RondiTelemetry.ActivitySourceName);   // our payout.process span
+        t.AddAspNetCoreInstrumentation(o =>
+            o.Filter = ctx => !ctx.Request.Path.StartsWithSegments("/health"));   // probes are not traced
+        t.AddNpgsql();                                     // one span per SQL command
+        if (otlpEnabled) t.AddOtlpExporter();              // send traces only if an endpoint is set
+    })
+    .WithMetrics(m =>
+    {
+        m.AddMeter(RondiTelemetry.MeterName);              // our business counters
+        m.AddAspNetCoreInstrumentation();                  // request count and duration
+        if (otlpEnabled) m.AddOtlpExporter();              // send metrics only if an endpoint is set
+    });
+
+if (otlpEnabled)
+{
+    builder.Logging.AddOpenTelemetry(o =>
+    {
+        o.SetResourceBuilder(resource);                    // same service name on logs
+        o.IncludeFormattedMessage = true;                  // readable message in the dashboard
+        o.AddOtlpExporter();                               // send logs only if an endpoint is set
+    });
+}
 
 var connectionString = builder.Configuration.GetConnectionString("RondiTrack")
     ?? throw new InvalidOperationException(
@@ -46,8 +90,8 @@ builder.Services.AddDbContext<RondiTrackDbContext>(o =>
         maxRetryDelay: TimeSpan.FromSeconds(10),
         errorCodesToAdd: null));
 
-    // CHANGED 6.1: sensitive data logging removed, so no parameter values (emails, hashes) can reach a log.
-    // Turn it on briefly by hand if you need real values for EXPLAIN ANALYZE.
+    // 6.2: no LogTo and no sensitive-data logging anywhere. SQL is logged once by the
+    // "Microsoft.EntityFrameworkCore.Database.Command" category, whose level is set per environment in appsettings.
 });
 
 // NEW 6.1: authentication (who are you?)
@@ -124,6 +168,22 @@ builder.Services.AddScoped<IContributionService, ContributionService>();
 builder.Services.AddScoped<IPayoutFaultHook, NoOpPayoutFaultHook>();
 builder.Services.AddScoped<IPayoutService, PayoutService>();
 
+// ---------- NEW 6.2: health checks ----------
+// Only the "ready" check touches PostgreSQL. /health/live runs nothing.
+builder.Services.AddHealthChecks()
+    .AddDbContextCheck<RondiTrackDbContext>("postgres", failureStatus: HealthStatus.Unhealthy, tags: ["ready"]);
+
+// Cap on how long a readiness check may run (seconds). 0 = no cap (only used to measure "before" in the README).
+var readyTimeoutSeconds = builder.Configuration.GetValue("Health:ReadyTimeoutSeconds", 2);
+if (readyTimeoutSeconds > 0)
+{
+    builder.Services.Configure<HealthCheckServiceOptions>(o =>
+    {
+        foreach (var check in o.Registrations)
+            check.Timeout = TimeSpan.FromSeconds(readyTimeoutSeconds);   // a hung database cannot hang the probe
+    });
+}
+
 var app = builder.Build();
 
 // ADDED 5.3: volume seeding only runs when you ask for it:  dotnet run -- --seed-volume
@@ -157,6 +217,12 @@ app.UseHttpsRedirection();
 app.UseAuthentication();   // NEW 6.1: reads the token (who are you?)
 app.UseAuthorization();    // NEW 6.1: applies the policies (what may you do?)
 app.MapControllers();
+
+// NEW 6.2: probes. AllowAnonymous beats the 6.1 fallback policy. Output is only "Healthy" or "Unhealthy".
+app.MapHealthChecks("/health/live", new HealthCheckOptions { Predicate = _ => false })   // no checks at all
+    .AllowAnonymous();
+app.MapHealthChecks("/health/ready", new HealthCheckOptions { Predicate = r => r.Tags.Contains("ready") })   // PostgreSQL only
+    .AllowAnonymous();
 
 app.Run();
 
