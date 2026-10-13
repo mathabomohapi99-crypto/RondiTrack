@@ -1,4 +1,5 @@
-﻿# RondiTrack API (Week 4, Day 1)
+> **STATUS (submitted 2026-10-13 23:38):** Work in progress. Added so far: `ApiRoutes`, CORS / rate-limiting setup files, home-screen DTO and controller. Not yet wired in or finished: route versioning in controllers, CORS and rate limiter in the pipeline, `HomeService`, strict number handling, TypeScript client, tests. The sections below describe the intended design.
+# RondiTrack API (Week 4, Day 1)
 
 A .NET 10 Web API for tracking stokvels and their members, with in-memory data.
 
@@ -44,20 +45,20 @@ member list, since that's what a caller actually needs.
 Mapping is done by hand in `Dtos/MappingExtensions.cs`, one `ToResponse()` extension method per
 entity. I kept manual mapping even setting the constraint aside: this project touches money, and
 an auto-mapping library matches fields by name/convention, which is exactly the over-posting risk
-the brief warns about â€” a typo'd or renamed field could silently stop mapping, or worse, a new
+the brief warns about — a typo'd or renamed field could silently stop mapping, or worse, a new
 internal field could get exposed without anyone noticing. A hand-written method makes every field
 that crosses the boundary an explicit, reviewable line of code.
 
 ### Service layer
 Two services hold the real decisions:
 
-- `StokvelMembershipService` â€” adding/removing a member spans two repositories (Stokvel and User)
+- `StokvelMembershipService` — adding/removing a member spans two repositories (Stokvel and User)
   and needs to check both exist before touching either. That's more than validation; it's an
   orchestration decision, so it moved out of the controller.
-- `ContributionService` â€” recording a contribution is RondiTrack's first money-moving operation.
+- `ContributionService` — recording a contribution is RondiTrack's first money-moving operation.
   It has to check the stokvel exists, the user exists, the user is actually a member, the same
   cycle hasn't already been paid, and it owns the idempotency check. That's several decisions
-  spanning three repositories plus the idempotency store â€” clearly service-layer work, not a
+  spanning three repositories plus the idempotency store — clearly service-layer work, not a
   controller if-statement.
 
 Everything else (basic CRUD) stayed in the controllers, since create/read/update/delete on a
@@ -70,21 +71,21 @@ request. The service:
 2. Looks up the key in `IIdempotencyStore` (in-memory, same pattern as the repositories).
 3. If the key exists with the *same* hash: returns the original response again, without touching
    the data a second time (a safe replay).
-4. If the key exists with a *different* hash: rejects with 409 â€” reusing a key for a different
+4. If the key exists with a *different* hash: rejects with 409 — reusing a key for a different
    request is not the same as retrying, and silently accepting it would hide a real client bug.
 5. If the key is new: does the real work (all the existence/membership/duplicate-cycle checks),
    records the contribution, and saves the response under that key for future replays.
 
 Tested in Scalar: the same key + same body sent twice returned the same contribution `id` both
 times (no duplicate recorded); the same key + a changed `amount` returned 409; a new key with the
-same `cycle` for the same user also returned 409, with a different message â€” the real
+same `cycle` for the same user also returned 409, with a different message — the real
 "already paid for this cycle" rule, separate from the idempotency check.
 
 ### 400 vs 422
 `POST /api/stokvels/{id}/contributions` uses both, for different reasons:
-- **400** â€” the request itself is malformed: the `Idempotency-Key` header is missing entirely.
+- **400** — the request itself is malformed: the `Idempotency-Key` header is missing entirely.
   Nothing about the data could be evaluated yet.
-- **422** â€” the request is well-formed JSON pointing at a real stokvel, but a reference inside
+- **422** — the request is well-formed JSON pointing at a real stokvel, but a reference inside
   it doesn't resolve: the `userId` doesn't exist, or exists but isn't actually a member of that
   stokvel. The request made sense structurally; its meaning just didn't hold up.
 
@@ -103,7 +104,7 @@ error.
 `DomainReferenceException` (422), plus FluentValidation's `ValidationException` (400) for malformed
 requests caught before the service layer runs.
 
-The idempotency-key conflict and a duplicate contribution both use `DomainConflictException` â€” I
+The idempotency-key conflict and a duplicate contribution both use `DomainConflictException` — I
 classified them as the same kind of failure, because both describe a request that is well-formed
 and valid on its own but clashes with something that already happened (a prior contribution, a
 prior use of the same key with different data).
@@ -121,7 +122,7 @@ correlation ID, and writes a single `application/problem+json` shape. No control
 `ProblemDetails` by hand anymore.
 
 ### ContributionCycle
-Plain CRUD from the controller, no service method â€” there's no cross-entity decision involved,
+Plain CRUD from the controller, no service method — there's no cross-entity decision involved,
 just checking the parent stokvel exists before creating a cycle. `Contribution` now references a
 real `ContributionCycle.Id` instead of a placeholder cycle number.
 
@@ -131,7 +132,7 @@ for that request, e.g.:
 
 ### Negative-path tests
 `RondiTrack.Tests/ErrorHandlingTests.cs` covers a malformed request (400), a not-found resource
-(404), and a business-rule conflict (409) â€” all asserting both the status code and that the
+(404), and a business-rule conflict (409) — all asserting both the status code and that the
 response content type is `application/problem+json`. All 3 pass.
 
 
@@ -140,28 +141,28 @@ response content type is `application/problem+json`. All 3 pass.
 
 ### Documentation
 
-Every endpoint across 4.1â€“4.3 now has an XML `<summary>` and `[ProducesResponseType]` attributes
-for every realistic response â€” success and every problem+json failure it can return (400/404/409/422
-as applicable) â€” so Scalar shows the full contract, not just the inferred happy path.
+Every endpoint across 4.1–4.3 now has an XML `<summary>` and `[ProducesResponseType]` attributes
+for every realistic response — success and every problem+json failure it can return (400/404/409/422
+as applicable) — so Scalar shows the full contract, not just the inferred happy path.
 
 ### Test suite
 
-* `UnitTests.cs` â€” no HTTP, no DI container. Tests `Stokvel.AddMember` directly (full stokvel,
+* `UnitTests.cs` — no HTTP, no DI container. Tests `Stokvel.AddMember` directly (full stokvel,
   duplicate member, success) and `ContributionService` built by hand from its in-memory repositories
   (duplicate-cycle rule, idempotent replay, idempotency-key conflict on a different payload).
-* `IntegrationTests.cs` â€” through `WebApplicationFactory`, exercising the real pipeline (validation â†’
-  service â†’ exception handler): happy paths for Users and Stokvels, a validation failure, a not-found,
+* `IntegrationTests.cs` — through `WebApplicationFactory`, exercising the real pipeline (validation →
+  service → exception handler): happy paths for Users and Stokvels, a validation failure, a not-found,
   the membership business rule (409 full, 422 nonexistent user), and the full idempotency guarantee
   (same key/same body replay, same key/different body 409, new key/same cycle 409, missing key 400).
-* `ErrorHandlingTests.cs` (from 4.3) â€” malformed request, not-found, duplicate-email conflict.
+* `ErrorHandlingTests.cs` (from 4.3) — malformed request, not-found, duplicate-email conflict.
 
 ### Edge cases
 
-1. **Empty collection** â€” `GET /members` on a stokvel with no members yet. Found by asking what the
+1. **Empty collection** — `GET /members` on a stokvel with no members yet. Found by asking what the
    very first request against a brand-new stokvel looks like, before anyone has joined.
-2. **Boundary value** â€” `MaxMembers = 2`, the validator's inclusive minimum. Found by re-reading
+2. **Boundary value** — `MaxMembers = 2`, the validator's inclusive minimum. Found by re-reading
    `InclusiveBetween(2, 50)` and checking the edge itself is accepted, not just values inside it.
-3. **Cross-resource reference** â€” a contribution request whose `CycleId` is valid but belongs to a
+3. **Cross-resource reference** — a contribution request whose `CycleId` is valid but belongs to a
    *different* stokvel than the one in the URL. Found by noticing the service only checked the cycle
    existed, not that it belonged to the stokvel being paid into.
 
@@ -196,7 +197,7 @@ Build succeeded with 4 warning(s) in 18.0s
 | GET .../members/{userId}    | Yes        | N/A       | No                                          | No                                 | Yes                   |
 | POST .../members            | Yes        | Yes       | Yes (full, duplicate, success)              | Yes (409, 422)                     | Yes                   |
 | DELETE .../members/{userId} | Yes        | N/A       | No                                          | No                                 | Yes                   |
-| POST .../contributions      | Yes        | Yes       | Yes (duplicate cycle, replay, key conflict) | Yes (400, 409Ã—2, 422, idempotency) | Yes                   |
+| POST .../contributions      | Yes        | Yes       | Yes (duplicate cycle, replay, key conflict) | Yes (400, 409×2, 422, idempotency) | Yes                   |
 | GET .../cycles              | Yes        | N/A       | No                                          | No                                 | Yes                   |
 | GET .../cycles/{id}         | Yes        | N/A       | No                                          | No                                 | Yes                   |
 | POST .../cycles             | Yes        | Yes       | No                                          | Used as test seed helper           | Yes                   |
@@ -208,12 +209,12 @@ Build succeeded with 4 warning(s) in 18.0s
 Plain CRUD reads/updates/deletes on Users, Stokvels, and ContributionCycles (the "No" rows above)
 have no dedicated integration test. Deliberate, time-boxed choice: they carry no business logic
 beyond what the entity constructors and FluentValidation already unit-guarantee, so test effort went
-into the endpoints that actually decide something â€” membership and contributions. Closing this gap
+into the endpoints that actually decide something — membership and contributions. Closing this gap
 is the first thing to do before Week 5 persistence work touches these same code paths.
 
 
 
-## Assignment 5.1 â€“ EF Core & Database Foundations
+## Assignment 5.1 – EF Core & Database Foundations
 
 ### 1. PostgreSQL setup
 I first installed Docker Desktop (with WSL 2), but its engine returned a 500 error and was very slow to start on my machine, so I switched to a **local PostgreSQL 18 install**. It has fewer moving parts, needs no WSL, and runs as a Windows service that starts again by itself after a reboot or power cut.
@@ -250,7 +251,7 @@ dotnet user-secrets set "ConnectionStrings:RondiTrack" "Host=localhost;Port=5432
 If the secret is missing, the app fails at startup with a clear message.
 
 ### 5. Retry and pooling
-`EnableRetryOnFailure(maxRetryCount: 4, maxRetryDelay: 10 seconds)`. The delay grows between attempts, so a short database restart or network blip gets about 15â€“20 seconds to recover, but a user is never left waiting for minutes. **Retried:** transient failures such as a dropped connection or a server that is still starting up (PostgreSQL error 57P03). **Deliberately not retried:** a unique-constraint violation (23505) or a wrong password (28P01), because retrying gives the same result and would hide a real bug. Npgsql pooling is on by default; I set `Maximum Pool Size=20`, which is plenty for this project without exhausting PostgreSQL connections.
+`EnableRetryOnFailure(maxRetryCount: 4, maxRetryDelay: 10 seconds)`. The delay grows between attempts, so a short database restart or network blip gets about 15–20 seconds to recover, but a user is never left waiting for minutes. **Retried:** transient failures such as a dropped connection or a server that is still starting up (PostgreSQL error 57P03). **Deliberately not retried:** a unique-constraint violation (23505) or a wrong password (28P01), because retrying gives the same result and would hide a real bug. Npgsql pooling is on by default; I set `Maximum Pool Size=20`, which is plenty for this project without exhausting PostgreSQL connections.
 
 ### 6. Repository swapped
 I swapped **`ContributionRepository`** because it backs the duplicate-contribution rule (`ExistsAsync`) that my Assignment 4.4 tests exercise hardest. `EfContributionRepository` implements the existing `IContributionRepository` unchanged. `StokvelsController`, `ContributionService` and the DTOs did not change, and the registration moved from Singleton to Scoped.
@@ -645,19 +646,19 @@ The other tests (idempotency, member limits, contributions, validation) were una
 | Registration | Lifetime | Holds a DbContext? | Why this lifetime |
 |---|---|---|---|
 | RondiTrackDbContext (AddDbContext) | Scoped | Is the DbContext | Not thread-safe, so one per request |
-| IIdempotencyStore â†’ InMemoryIdempotencyStore | Singleton | No | In-memory keys must survive across requests; it uses no DbContext |
-| IUserRepository â†’ EfUserRepository | Scoped | Yes, directly | Holds a DbContext, so it can't outlive it |
-| IStokvelRepository â†’ EfStokvelRepository | Scoped | Yes, directly | Same reason |
-| IContributionCycleRepository â†’ EfContributionCycleRepository | Scoped | Yes, directly | Same reason |
-| IContributionRepository â†’ EfContributionRepository | Scoped | Yes, directly | Same reason |
-| IStokvelMemberRepository â†’ EfStokvelMemberRepository | Scoped | Yes, directly | Same reason |
-| IContributionQueries â†’ ContributionQueries | Scoped | Yes, directly | Runs queries on the DbContext |
+| IIdempotencyStore → InMemoryIdempotencyStore | Singleton | No | In-memory keys must survive across requests; it uses no DbContext |
+| IUserRepository → EfUserRepository | Scoped | Yes, directly | Holds a DbContext, so it can't outlive it |
+| IStokvelRepository → EfStokvelRepository | Scoped | Yes, directly | Same reason |
+| IContributionCycleRepository → EfContributionCycleRepository | Scoped | Yes, directly | Same reason |
+| IContributionRepository → EfContributionRepository | Scoped | Yes, directly | Same reason |
+| IStokvelMemberRepository → EfStokvelMemberRepository | Scoped | Yes, directly | Same reason |
+| IContributionQueries → ContributionQueries | Scoped | Yes, directly | Runs queries on the DbContext |
 | ContributionPagingService | Scoped | Yes, directly | Takes the DbContext in its constructor |
 | MemberPagingService | Scoped | Yes, directly | Takes the DbContext in its constructor |
-| IStokvelMembershipService â†’ StokvelMembershipService | Scoped | Yes, indirectly | Depends on Scoped repositories |
-| IContributionService â†’ ContributionService | Scoped | Yes, indirectly | Depends on Scoped repositories |
-| IPayoutFaultHook â†’ NoOpPayoutFaultHook | Scoped | No | Needs no DbContext; Scoped is safe next to Scoped services |
-| IPayoutService â†’ PayoutService | Scoped | Yes, directly | Takes the DbContext in its constructor |
+| IStokvelMembershipService → StokvelMembershipService | Scoped | Yes, indirectly | Depends on Scoped repositories |
+| IContributionService → ContributionService | Scoped | Yes, indirectly | Depends on Scoped repositories |
+| IPayoutFaultHook → NoOpPayoutFaultHook | Scoped | No | Needs no DbContext; Scoped is safe next to Scoped services |
+| IPayoutService → PayoutService | Scoped | Yes, directly | Takes the DbContext in its constructor |
 
 No Singleton depends on a DbContext, so no registration needed fixing.
 
