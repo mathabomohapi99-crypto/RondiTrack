@@ -898,3 +898,29 @@ info: RondiTrack.Errors.RondiExceptionHandler[0]
       Request rejected with status 401 (InvalidCredentialsException). CorrelationId: 53b03b591b4fee44a052cf2efc96b4e0
 
 info: RondiTrack.Auth.StokvelAccess[0]
+
+# Assignment 6.3: Ready for the Frontend
+
+> Replace every `<<PASTE>>` with real output from your machine, and every `<<ADAPT>>` with your own name.
+
+## 1. Versioning
+
+- Every route lives under `/api/v1/...`. The prefix is defined once in `ApiRoutes.V1` (`API/Common/ApiRoutes.cs`). Controllers use `[Route($"{ApiRoutes.V1}/...")]`.
+- Only one version exists, so there is no versioning library, just a constant.
+- **Refresh cookie:** its `Path` moved from `<<old path>>` to `/api/v1/auth`. A browser only sends a cookie to URLs under its `Path`, so leaving the old value would make refresh fail silently. A test proves refresh works at the new path: `Refresh_works_at_versioned_path`.
+- **Not versioned:** `/health/live` and `/health/ready`. They are infrastructure probes, not part of the API contract.
+- All existing tests had only their URLs updated. No assertion was changed.
+
+## 2. CORS
+
+| Setting | Value |
+|---|---|
+| Allowed origins | From config `Cors:AllowedOrigins`. `http://localhost:3000` in `appsettings.Development.json`, empty list in `appsettings.json` |
+| Methods | `GET, POST, PUT, PATCH, DELETE` (explicit) |
+| Request headers | `Content-Type, Authorization, Idempotency-Key, If-Match, If-None-Match` (explicit) |
+| Exposed headers | `Retry-After, <<ADAPT: idempotency replay header>>, ETag, Location` |
+| Credentials | `AllowCredentials()` |
+| Wildcard / origin reflection | Never. Startup throws if an origin contains `*` or a trailing slash |
+
+- The policy is named once (`CorsPolicies.Frontend`). Controllers do not mention CORS.
+- **Preflight vs the 6.1 fallback policy:** `UseCors` runs before `UseAuthentication` and `UseAuthorization`.

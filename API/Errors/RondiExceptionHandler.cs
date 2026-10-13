@@ -8,44 +8,63 @@ using RondiTrack.Auth;
 using RondiTrack.Common;
 using RondiTrack.Domain;
 using RondiTrack.Telemetry;
+// using RondiTrack.Web;   // TODO 6.3 (Task 2): uncomment once CorsSetup exists
 using System.Text.Json;
 
 namespace RondiTrack.Errors;
 
+// This class catches every exception that escapes a controller or service.
+// Its job: turn the exception into a safe, consistent problem+json response.
+// (Registered in Program.cs with AddExceptionHandler and UseExceptionHandler.)
 public sealed class RondiExceptionHandler(ILogger<RondiExceptionHandler> logger) : IExceptionHandler
 {
     public async ValueTask<bool> TryHandleAsync(HttpContext httpContext, Exception exception, CancellationToken cancellationToken)
     {
+        // TODO 6.3 (Task 2): uncomment this line after adding CorsSetup.
+        // UseExceptionHandler wipes response headers (including CORS ones), so this puts them back.
+        // await CorsSetup.ReapplyAsync(httpContext);
+
+        // One id that links the response, the log line and the trace (from 6.2)
         var correlationId = CorrelationId.For(httpContext);   // CHANGED 6.2: the W3C trace id, not TraceIdentifier
 
+        // Default = an unknown error, so a 500 with a generic message.
+        // Any exception we do not recognise below ends up here.
         var status = StatusCodes.Status500InternalServerError;
         var title = "Internal Server Error";
         var detail = "An unexpected error occurred.";   // the ONLY text a client sees for a 5xx
 
+        // Below: pick the status, title and detail from the exception type.
+        // Only our own exception types pass on their message, because we wrote those messages.
+
+        // FluentValidation failed -> 400
         if (exception is ValidationException vex)
         {
             status = StatusCodes.Status400BadRequest;
             title = "Validation Failed";
             detail = string.Join(" ", vex.Errors.Select(e => e.ErrorMessage));
         }
+        // Something does not exist -> 404
         else if (exception is DomainNotFoundException)
         {
             status = StatusCodes.Status404NotFound;
             title = "Not Found";
             detail = exception.Message;
         }
+        // A business rule clash (duplicate, wrong state) -> 409
         else if (exception is DomainConflictException)
         {
             status = StatusCodes.Status409Conflict;
             title = "Conflict";
             detail = exception.Message;
         }
+        // The request points at something that is not there (bad reference) -> 422
         else if (exception is DomainReferenceException)
         {
             status = StatusCodes.Status422UnprocessableEntity;
             title = "Unprocessable Entity";
             detail = exception.Message;
         }
+        // A business rule says the input is invalid -> 400
         else if (exception is DomainValidationException)
         {
             status = StatusCodes.Status400BadRequest;
@@ -72,7 +91,7 @@ public sealed class RondiExceptionHandler(ILogger<RondiExceptionHandler> logger)
             status = StatusCodes.Status401Unauthorized;
             title = "Unauthorized";
             detail = exception.Message;
-            httpContext.Response.Headers.WWWAuthenticate = "Bearer";
+            httpContext.Response.Headers.WWWAuthenticate = "Bearer";   // tells the client which scheme to use
         }
         // NEW 6.1: signed in but missing the role in this stokvel -> 403
         else if (exception is ForbiddenException)
@@ -81,7 +100,8 @@ public sealed class RondiExceptionHandler(ILogger<RondiExceptionHandler> logger)
             title = "Forbidden";
             detail = exception.Message;
         }
-        // ADDED 5.3: xmin token was stale. If the client sent If-Match, the precondition failed (412).
+        // ADDED 5.3: xmin token was stale (someone else changed the row first).
+        // If the client sent If-Match, the precondition failed (412).
         // If there was no If-Match (a race inside the server, e.g. two payouts at once), it is a plain 409.
         else if (exception is DbUpdateConcurrencyException)
         {
@@ -98,7 +118,8 @@ public sealed class RondiExceptionHandler(ILogger<RondiExceptionHandler> logger)
                 detail = "This record was changed by someone else at the same time. Reload it and try again.";
             }
         }
-        // ADDED 5.3: a database unique constraint fired (SQLSTATE 23505) -> 409 instead of 500
+        // ADDED 5.3: a database unique constraint fired (SQLSTATE 23505) -> 409 instead of 500.
+        // We write our own detail, so no database text reaches the client.
         else if (exception is DbUpdateException { InnerException: PostgresException { SqlState: PostgresErrorCodes.UniqueViolation } })
         {
             status = StatusCodes.Status409Conflict;
@@ -106,33 +127,6 @@ public sealed class RondiExceptionHandler(ILogger<RondiExceptionHandler> logger)
             detail = "That record already exists (it would break a uniqueness rule).";
         }
 
+        // ---------- Logging ----------
         // CHANGED 6.2 (POPIA): a 5xx is a real failure, so it gets the full exception at Error.
-        if (status >= 500)
-        {
-            logger.LogError(exception, "Request failed with status {Status}. CorrelationId: {CorrelationId}",
-                status, correlationId);
-        }
-        else
-        {
-            // CHANGED 6.2 (POPIA): a 4xx is an expected answer. Log the exception TYPE only, never its message or stack.
-            logger.LogInformation("Request rejected with status {Status} ({ExceptionType}). CorrelationId: {CorrelationId}",
-                status, exception.GetType().Name, correlationId);
-        }
-
-        var problemDetails = new ProblemDetails
-        {
-            Status = status,
-            Title = title,
-            Detail = detail
-        };
-        problemDetails.Extensions["correlationId"] = correlationId;   // same id as the log line and the trace
-
-        httpContext.Response.StatusCode = status;
-        httpContext.Response.ContentType = "application/problem+json";
-
-        var json = JsonSerializer.Serialize(problemDetails);
-        await httpContext.Response.WriteAsync(json, cancellationToken);
-
-        return true;
-    }
-}
+        if (status >=
