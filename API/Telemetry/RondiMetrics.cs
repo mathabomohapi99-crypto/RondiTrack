@@ -22,6 +22,16 @@ public static class RondiMetrics
     public const string ContributionsRecordedName = "ronditrack.contributions.recorded";
     public const string PayoutsProcessedName = "ronditrack.payouts.processed";
     public const string AuthorizationRefusalsName = "ronditrack.authorization.refusals";
+        public const string CyclesClosedName = "ronditrack.cycles.closed";       // 6.4
+    public const string ArrearsRecordedName = "ronditrack.arrears.recorded"; // 6.4
+
+    private static readonly Counter<long> CyclesClosedCounter =
+        AppMeter.CreateCounter<long>(CyclesClosedName, description: "Cycles closed by the job");      // 6.4, no tags
+    private static readonly Counter<long> ArrearsCounter =
+        AppMeter.CreateCounter<long>(ArrearsRecordedName, description: "Arrears recorded by the job"); // 6.4, no tags
+
+    public static void CyclesClosed(long n) => CyclesClosedCounter.Add(n);      // 6.4
+    public static void ArrearsRecorded(long n) => ArrearsCounter.Add(n);        // 6.4
 
     private static readonly Meter AppMeter = new(RondiTelemetry.MeterName);
 
