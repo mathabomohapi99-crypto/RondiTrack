@@ -15,21 +15,21 @@ public class PagingTests(PostgresApiFactory factory)
     // Builds a stokvel with 3 members who each contributed once. Returns the list URL.
     private async Task<string> SeedThreeContributionsAsync()
     {
-        var stokvel = (await (await _client.PostAsJsonAsync("/api/stokvels",
+        var stokvel = (await (await _client.PostAsJsonAsync("/api/v1/stokvels",
             new { Name = $"Paging {Guid.NewGuid()}", ContributionAmount = 100m, Frequency = 1, MaxMembers = 5 }))
             .Content.ReadFromJsonAsync<IdDto>())!;
 
-        var cycle = (await (await _client.PostAsJsonAsync($"/api/stokvels/{stokvel.Id}/cycles",
+        var cycle = (await (await _client.PostAsJsonAsync($"/api/v1/stokvels/{stokvel.Id}/cycles",
             new { CycleNumber = 1, TargetAmount = 100m })).Content.ReadFromJsonAsync<IdDto>())!;
 
         for (var i = 0; i < 3; i++)
         {
-            var user = (await (await _client.PostAsJsonAsync("/api/users",
+            var user = (await (await _client.PostAsJsonAsync("/api/v1/users",
                 new { FullName = $"Pager {i}", Email = $"pager{Guid.NewGuid()}@example.com" }))
                 .Content.ReadFromJsonAsync<IdDto>())!;
-            await _client.PostAsJsonAsync($"/api/stokvels/{stokvel.Id}/members", new { UserId = user.Id });
+            await _client.PostAsJsonAsync($"/api/v1/stokvels/{stokvel.Id}/members", new { UserId = user.Id });
 
-            var request = new HttpRequestMessage(HttpMethod.Post, $"/api/stokvels/{stokvel.Id}/contributions")
+            var request = new HttpRequestMessage(HttpMethod.Post, $"/api/v1/stokvels/{stokvel.Id}/contributions")
             {
                 Content = JsonContent.Create(new { UserId = user.Id, CycleId = cycle.Id, Amount = 100m })
             };
@@ -37,7 +37,7 @@ public class PagingTests(PostgresApiFactory factory)
             await _client.SendAsync(request);
         }
 
-        return $"/api/stokvels/{stokvel.Id}/cycles/{cycle.Id}/contributions";
+        return $"/api/v1/stokvels/{stokvel.Id}/cycles/{cycle.Id}/contributions";
     }
 
     [Fact]

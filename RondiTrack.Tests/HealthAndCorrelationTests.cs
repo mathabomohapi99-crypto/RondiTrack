@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using System.Text.Json;
 using RondiTrack.Domain;
 using RondiTrack.Tests.TestSupport;
@@ -52,7 +52,7 @@ public class HealthAndCorrelationTests(PostgresApiFactory factory)
     public async Task Anonymous_401_Returns_The_Sent_Trace_Id_As_CorrelationId()
     {
         var response = await factory.CreateAnonymousClient()
-            .SendAsync(WithTraceparent($"/api/stokvels/{Guid.NewGuid()}"));
+            .SendAsync(WithTraceparent($"/api/v1/stokvels/{Guid.NewGuid()}"));
 
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
         Assert.Equal(SentTraceId, await CorrelationIdAsync(response));   // same id we sent
@@ -71,7 +71,7 @@ public class HealthAndCorrelationTests(PostgresApiFactory factory)
         }
 
         var outsider = factory.CreateClientFor(Guid.NewGuid());   // signed in, but not a member
-        var response = await outsider.SendAsync(WithTraceparent($"/api/stokvels/{stokvelId}"));
+        var response = await outsider.SendAsync(WithTraceparent($"/api/v1/stokvels/{stokvelId}"));
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
         Assert.Equal(SentTraceId, await CorrelationIdAsync(response));
@@ -81,7 +81,7 @@ public class HealthAndCorrelationTests(PostgresApiFactory factory)
     public async Task Framework_403_Returns_The_Sent_Trace_Id_As_CorrelationId()
     {
         var user = factory.CreateClientFor(Guid.NewGuid());   // not a platform admin
-        var response = await user.SendAsync(WithTraceparent("/api/stokvels"));   // platform admins only
+        var response = await user.SendAsync(WithTraceparent("/api/v1/stokvels"));   // platform admins only
 
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
         Assert.Equal(SentTraceId, await CorrelationIdAsync(response));
@@ -90,7 +90,7 @@ public class HealthAndCorrelationTests(PostgresApiFactory factory)
     [Fact]
     public async Task Without_A_Traceparent_The_CorrelationId_Is_A_New_32_Character_Trace_Id()
     {
-        var response = await factory.CreateAnonymousClient().GetAsync($"/api/stokvels/{Guid.NewGuid()}");
+        var response = await factory.CreateAnonymousClient().GetAsync($"/api/v1/stokvels/{Guid.NewGuid()}");
 
         Assert.Matches("^[0-9a-f]{32}$", await CorrelationIdAsync(response));   // 32 hex characters
     }

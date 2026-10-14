@@ -46,7 +46,10 @@ public class PostgresApiFactory : WebApplicationFactory<Program>, IAsyncLifetime
         // UseSetting (NOT ConfigureAppConfiguration) so Program.cs sees it at startup.
         // "RondiTrack" is the exact key your Program.cs reads.
         builder.UseSetting("ConnectionStrings:RondiTrack", _container.GetConnectionString());
-        builder.UseSetting("Jwt:SigningKey", _jwtKey);        // NEW 6.1: the app refuses to start without it
+        builder.UseSetting("Jwt:SigningKey", _jwtKey);
+        builder.UseSetting("RateLimiting:Login:PermitLimit", "10000");   // old tests must not trip the limits
+        builder.UseSetting("RateLimiting:Contribution:TokenLimit", "10000");
+        builder.UseSetting("RateLimiting:Payout:TokenLimit", "10000");        // NEW 6.1: the app refuses to start without it
     }
 
     // NEW 6.1: every client made with CreateClient() starts signed in as a platform admin.

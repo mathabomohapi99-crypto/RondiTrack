@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using Microsoft.Extensions.Logging;
@@ -36,19 +36,19 @@ public class LogLeakTests(PostgresApiFactory factory)
         var password = $"pw-{Guid.NewGuid():N}-xyz";
 
         // 1. register
-        var register = await _client.PostAsJsonAsync("/api/auth/register",
+        var register = await _client.PostAsJsonAsync("/api/v1/auth/register",
             new { FullName = "Leak Tester", Email = email, Password = password });
         Assert.Equal(HttpStatusCode.Created, register.StatusCode);
         var userId = (await register.Content.ReadFromJsonAsync<IdDto>())!.Id;
 
         // 2. log in
-        var login = await _client.PostAsJsonAsync("/api/auth/login", new { Email = email, Password = password });
+        var login = await _client.PostAsJsonAsync("/api/v1/auth/login", new { Email = email, Password = password });
         Assert.Equal(HttpStatusCode.OK, login.StatusCode);
         var accessToken1 = (await login.Content.ReadFromJsonAsync<TokenDto>())!.AccessToken;
         var refreshToken1 = CookieValue(login)!;
 
         // 3. refresh (rotates both tokens)
-        var refreshRequest = new HttpRequestMessage(HttpMethod.Post, "/api/auth/refresh");
+        var refreshRequest = new HttpRequestMessage(HttpMethod.Post, "/api/v1/auth/refresh");
         refreshRequest.Headers.Add("Cookie", $"{CookieName}={refreshToken1}");
         var refresh = await _client.SendAsync(refreshRequest);
         Assert.Equal(HttpStatusCode.OK, refresh.StatusCode);
@@ -74,7 +74,7 @@ public class LogLeakTests(PostgresApiFactory factory)
             cycleId = cycle.Id;
         }
 
-        var contribution = new HttpRequestMessage(HttpMethod.Post, $"/api/stokvels/{stokvelId}/contributions")
+        var contribution = new HttpRequestMessage(HttpMethod.Post, $"/api/v1/stokvels/{stokvelId}/contributions")
         {
             Content = JsonContent.Create(new { UserId = userId, CycleId = cycleId, Amount = 1234.56m })
         };
@@ -84,7 +84,7 @@ public class LogLeakTests(PostgresApiFactory factory)
 
         // 5. trigger the duplicate-registration 409
         var beforeConflict = factory.CapturedLogs.Entries.Count;   // remember where the 409 logs start
-        var duplicate = await _client.PostAsJsonAsync("/api/auth/register",
+        var duplicate = await _client.PostAsJsonAsync("/api/v1/auth/register",
             new { FullName = "Leak Again", Email = email, Password = password });
         Assert.Equal(HttpStatusCode.Conflict, duplicate.StatusCode);
 
