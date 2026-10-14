@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Authorization;
+﻿using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using RondiTrack.Auth;
 using RondiTrack.Common;
@@ -8,7 +8,7 @@ using RondiTrack.Dtos;
 
 namespace RondiTrack.Controllers;
 
-[Route("api/users")]
+[Route($"{ApiRoutes.V1}/users")]
 [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status401Unauthorized)]   // NEW 6.1
 [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]      // NEW 6.1
 public class UsersController(IUserRepository users, IStokvelRepository stokvels) : RondiControllerBase
