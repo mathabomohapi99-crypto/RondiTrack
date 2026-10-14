@@ -1,3 +1,5 @@
+﻿using Microsoft.AspNetCore.RateLimiting;
+using RondiTrack.Web;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using RondiTrack.Api.Common.Paging;
@@ -10,7 +12,7 @@ using RondiTrack.Services;
 
 namespace RondiTrack.Controllers;
 
-[Route("api/stokvels")]
+[Route($"{ApiRoutes.V1}/stokvels")]
 [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status401Unauthorized)]   // NEW 6.1: documented on every action
 [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]      // NEW 6.1
 public class StokvelsController(
@@ -148,6 +150,7 @@ public class StokvelsController(
     /// Requires an Idempotency-Key header.
     /// </summary>
     [HttpPost("{stokvelId:guid}/contributions")]
+    [EnableRateLimiting(RateLimitPolicies.Contribution)]
     [RequireStokvelMember]   // NEW 6.1: must at least be a member (non-members get 404 before anything else)
     [ProducesResponseType(typeof(ContributionResponse), StatusCodes.Status201Created)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
@@ -163,7 +166,8 @@ public class StokvelsController(
         if (string.IsNullOrWhiteSpace(idempotencyKey))
             throw new DomainValidationException("The Idempotency-Key header is required.");
 
-        var (response, _) = await contributionService.RecordContributionAsync(stokvelId, request, idempotencyKey);
+        var (response, replayed) = await contributionService.RecordContributionAsync(stokvelId, request, idempotencyKey);
+        if (replayed) Response.Headers[ApiHeaders.IdempotencyReplayed] = "true";
         return StatusCode(StatusCodes.Status201Created, response);
     }
 }
