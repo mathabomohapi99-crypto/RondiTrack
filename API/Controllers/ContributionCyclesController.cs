@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Mvc;
+﻿using Microsoft.AspNetCore.Mvc;
 using RondiTrack.Api.Common.Paging;
 using RondiTrack.Auth;
 using RondiTrack.Common;
@@ -9,7 +9,7 @@ using RondiTrack.Services;
 
 namespace RondiTrack.Controllers;
 
-[Route("api/stokvels/{stokvelId:guid}/cycles")]
+[Route($"{ApiRoutes.V1}/stokvels/{{stokvelId:guid}}/cycles")]
 [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status401Unauthorized)]   // NEW 6.1
 [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]      // NEW 6.1
 public class ContributionCyclesController(
