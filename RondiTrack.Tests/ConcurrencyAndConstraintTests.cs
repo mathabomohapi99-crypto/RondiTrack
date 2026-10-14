@@ -45,7 +45,7 @@ public class ConcurrencyAndConstraintTests(PostgresApiFactory factory)
     {
         // Stokvel is used for the HTTP test because it is one of the entities that has an edit endpoint.
         // Payout has no edit endpoint in RondiTrack, and adding one would be a new feature.
-        var created = await _client.PostAsJsonAsync("/api/stokvels",
+        var created = await _client.PostAsJsonAsync("/api/v1/stokvels",
             new { Name = $"Etag {Guid.NewGuid()}", ContributionAmount = 100m, Frequency = 1, MaxMembers = 5 });
         var location = created.Headers.Location!;
 
@@ -65,7 +65,7 @@ public class ConcurrencyAndConstraintTests(PostgresApiFactory factory)
     [Fact]
     public async Task Http_update_without_if_match_returns_428_problem()
     {
-        var created = await _client.PostAsJsonAsync("/api/stokvels",
+        var created = await _client.PostAsJsonAsync("/api/v1/stokvels",
             new { Name = $"NoEtag {Guid.NewGuid()}", ContributionAmount = 100m, Frequency = 1, MaxMembers = 5 });
 
         var response = await _client.PutAsJsonAsync(created.Headers.Location!,
