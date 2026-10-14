@@ -53,3 +53,23 @@ public sealed class ContributionCycle
         Status = CycleStatus.PaidOut;
     }
 }
+
+
+    // 6.4: last day of the cycle, as a calendar date in the stokvel's time zone (Africa/Johannesburg). null = no end date, job ignores it
+    public DateOnly? EndsOn { get; private set; }
+
+    // 6.4: set ONCE by a conditional UPDATE ... WHERE ClosedAtUtc IS NULL. This is the "exactly once" marker.
+    public DateTime? ClosedAtUtc { get; private set; }
+
+    // 6.4: constructor for the job. Time is passed in, so nothing here touches DateTime.UtcNow
+    public ContributionCycle(Guid stokvelId, int cycleNumber, decimal targetAmount, DateOnly endsOn, DateTime createdAtUtc)
+    {
+        if (cycleNumber < 1) throw new DomainValidationException("Cycle number must be 1 or greater.");
+        if (targetAmount <= 0) throw new DomainValidationException("Target amount must be greater than zero.");
+        Id = Guid.NewGuid();
+        StokvelId = stokvelId;
+        CycleNumber = cycleNumber;
+        TargetAmount = targetAmount;
+        EndsOn = endsOn;
+        CreatedAtUtc = createdAtUtc;
+    }
