@@ -1,19 +1,17 @@
+﻿using Microsoft.AspNetCore.Mvc;
+using RondiTrack.Auth;
+using RondiTrack.Common;
+using RondiTrack.Dtos;
+using RondiTrack.Services;
+
+namespace RondiTrack.Controllers;
+
 [Route($"{ApiRoutes.V1}/me")]
 public sealed class MeController(IHomeService home) : RondiControllerBase
 {
+    /// <summary>One response for the member's home screen: every stokvel they belong to.</summary>
     [HttpGet("home")]
+    [ProducesResponseType(typeof(HomeResponse), StatusCodes.Status200OK)]
     public async Task<ActionResult<HomeResponse>> Home(CancellationToken ct) =>
-        Ok(await home.GetAsync(User.GetUserId(), ct));
-}
-
-[Fact]
-public async Task Member_of_two_stokvels_sees_both_with_correct_roles() { /* seed user as Treasurer in A, Member in B → GET /api/v1/me/home → 2 items, roles "Treasurer" and "Member" */ }
-
-[Fact]
-public async Task User_in_no_stokvels_gets_empty_list_not_404()
-{
-    var res = await client.GetAsync("/api/v1/me/home");
-    Assert.Equal(HttpStatusCode.OK, res.StatusCode);
-    using var doc = JsonDocument.Parse(await res.Content.ReadAsStringAsync());
-    Assert.Equal(0, doc.RootElement.GetProperty("stokvels").GetArrayLength());
+        Ok(await home.GetAsync(User.GetUserId()!.Value, ct));
 }
