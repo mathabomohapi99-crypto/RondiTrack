@@ -1,4 +1,4 @@
-using FluentValidation;
+﻿using FluentValidation;
 using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -8,125 +8,78 @@ using RondiTrack.Auth;
 using RondiTrack.Common;
 using RondiTrack.Domain;
 using RondiTrack.Telemetry;
-// using RondiTrack.Web;   // TODO 6.3 (Task 2): uncomment once CorsSetup exists
+using RondiTrack.Web;
 using System.Text.Json;
 
 namespace RondiTrack.Errors;
 
-// This class catches every exception that escapes a controller or service.
-// Its job: turn the exception into a safe, consistent problem+json response.
-// (Registered in Program.cs with AddExceptionHandler and UseExceptionHandler.)
 public sealed class RondiExceptionHandler(ILogger<RondiExceptionHandler> logger) : IExceptionHandler
 {
     public async ValueTask<bool> TryHandleAsync(HttpContext httpContext, Exception exception, CancellationToken cancellationToken)
     {
-        // TODO 6.3 (Task 2): uncomment this line after adding CorsSetup.
-        // UseExceptionHandler wipes response headers (including CORS ones), so this puts them back.
-        // await CorsSetup.ReapplyAsync(httpContext);
+        // UseExceptionHandler wipes response headers (including CORS), so put them back
+        await CorsSetup.ReapplyAsync(httpContext);
 
-        // One id that links the response, the log line and the trace (from 6.2)
-        var correlationId = CorrelationId.For(httpContext);   // CHANGED 6.2: the W3C trace id, not TraceIdentifier
+        var correlationId = CorrelationId.For(httpContext);
 
-        // Default = an unknown error, so a 500 with a generic message.
-        // Any exception we do not recognise below ends up here.
         var status = StatusCodes.Status500InternalServerError;
         var title = "Internal Server Error";
-        var detail = "An unexpected error occurred.";   // the ONLY text a client sees for a 5xx
+        var detail = "An unexpected error occurred.";
+        Dictionary<string, string[]>? errors = null;   // field -> messages, validation only
 
-        // Below: pick the status, title and detail from the exception type.
-        // Only our own exception types pass on their message, because we wrote those messages.
-
-        // FluentValidation failed -> 400
         if (exception is ValidationException vex)
         {
             status = StatusCodes.Status400BadRequest;
             title = "Validation Failed";
-            detail = string.Join(" ", vex.Errors.Select(e => e.ErrorMessage));
+            detail = "One or more fields are invalid.";
+            errors = vex.Errors
+                .GroupBy(e => JsonNamingPolicy.CamelCase.ConvertName(e.PropertyName))
+                .ToDictionary(g => g.Key, g => g.Select(e => e.ErrorMessage).ToArray());
         }
-        // Something does not exist -> 404
-        else if (exception is DomainNotFoundException)
-        {
-            status = StatusCodes.Status404NotFound;
-            title = "Not Found";
-            detail = exception.Message;
-        }
-        // A business rule clash (duplicate, wrong state) -> 409
-        else if (exception is DomainConflictException)
-        {
-            status = StatusCodes.Status409Conflict;
-            title = "Conflict";
-            detail = exception.Message;
-        }
-        // The request points at something that is not there (bad reference) -> 422
-        else if (exception is DomainReferenceException)
-        {
-            status = StatusCodes.Status422UnprocessableEntity;
-            title = "Unprocessable Entity";
-            detail = exception.Message;
-        }
-        // A business rule says the input is invalid -> 400
-        else if (exception is DomainValidationException)
-        {
-            status = StatusCodes.Status400BadRequest;
-            title = "Bad Request";
-            detail = exception.Message;
-        }
-        // ADDED 5.3: bad paging / sort / filter / token input -> 400
-        else if (exception is ApiBadRequestException)
-        {
-            status = StatusCodes.Status400BadRequest;
-            title = "Bad Request";
-            detail = exception.Message;
-        }
-        // ADDED 5.3: update sent without If-Match -> 428
-        else if (exception is PreconditionRequiredException)
-        {
-            status = StatusCodes.Status428PreconditionRequired;
-            title = "Precondition Required";
-            detail = exception.Message;
-        }
-        // NEW 6.1: wrong login or bad refresh token -> 401 (the message is the same for every cause)
+        else if (exception is DomainNotFoundException) { status = 404; title = "Not Found"; detail = exception.Message; }
+        else if (exception is DomainConflictException) { status = 409; title = "Conflict"; detail = exception.Message; }
+        else if (exception is DomainReferenceException) { status = 422; title = "Unprocessable Entity"; detail = exception.Message; }
+        else if (exception is DomainValidationException) { status = 400; title = "Bad Request"; detail = exception.Message; }
+        else if (exception is ApiBadRequestException) { status = 400; title = "Bad Request"; detail = exception.Message; }
+        else if (exception is PreconditionRequiredException) { status = 428; title = "Precondition Required"; detail = exception.Message; }
         else if (exception is InvalidCredentialsException or InvalidRefreshTokenException)
         {
-            status = StatusCodes.Status401Unauthorized;
-            title = "Unauthorized";
-            detail = exception.Message;
-            httpContext.Response.Headers.WWWAuthenticate = "Bearer";   // tells the client which scheme to use
+            status = 401; title = "Unauthorized"; detail = exception.Message;
+            httpContext.Response.Headers.WWWAuthenticate = "Bearer";
         }
-        // NEW 6.1: signed in but missing the role in this stokvel -> 403
-        else if (exception is ForbiddenException)
-        {
-            status = StatusCodes.Status403Forbidden;
-            title = "Forbidden";
-            detail = exception.Message;
-        }
-        // ADDED 5.3: xmin token was stale (someone else changed the row first).
-        // If the client sent If-Match, the precondition failed (412).
-        // If there was no If-Match (a race inside the server, e.g. two payouts at once), it is a plain 409.
+        else if (exception is ForbiddenException) { status = 403; title = "Forbidden"; detail = exception.Message; }
         else if (exception is DbUpdateConcurrencyException)
         {
             if (httpContext.Request.Headers.ContainsKey("If-Match"))
             {
-                status = StatusCodes.Status412PreconditionFailed;
-                title = "Precondition Failed";
+                status = 412; title = "Precondition Failed";
                 detail = "This record was changed by someone else since you loaded it. Reload it and try again.";
             }
             else
             {
-                status = StatusCodes.Status409Conflict;
-                title = "Conflict";
+                status = 409; title = "Conflict";
                 detail = "This record was changed by someone else at the same time. Reload it and try again.";
             }
         }
-        // ADDED 5.3: a database unique constraint fired (SQLSTATE 23505) -> 409 instead of 500.
-        // We write our own detail, so no database text reaches the client.
         else if (exception is DbUpdateException { InnerException: PostgresException { SqlState: PostgresErrorCodes.UniqueViolation } })
         {
-            status = StatusCodes.Status409Conflict;
-            title = "Conflict";
+            status = 409; title = "Conflict";
             detail = "That record already exists (it would break a uniqueness rule).";
         }
 
-        // ---------- Logging ----------
-        // CHANGED 6.2 (POPIA): a 5xx is a real failure, so it gets the full exception at Error.
-        if (status >=
+        if (status >= 500)
+            logger.LogError(exception, "Request failed with status {Status}. CorrelationId: {CorrelationId}", status, correlationId);
+        else
+            logger.LogInformation("Request rejected with status {Status} ({ExceptionType}). CorrelationId: {CorrelationId}",
+                status, exception.GetType().Name, correlationId);
+
+        var problemDetails = new ProblemDetails { Status = status, Title = title, Detail = detail };
+        problemDetails.Extensions["correlationId"] = correlationId;
+        if (errors is not null) problemDetails.Extensions["errors"] = errors;
+
+        httpContext.Response.StatusCode = status;
+        httpContext.Response.ContentType = "application/problem+json";
+        await httpContext.Response.WriteAsync(JsonSerializer.Serialize(problemDetails), cancellationToken);
+        return true;
+    }
+}
