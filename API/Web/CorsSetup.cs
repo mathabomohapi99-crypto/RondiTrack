@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Cors.Infrastructure;
+﻿using Microsoft.AspNetCore.Cors.Infrastructure;
 
 namespace RondiTrack.Web;
 
@@ -29,8 +29,11 @@ public static class CorsSetup
     /// exception-based errors (404/403/409/500). Call this at the top of the handler to put them back.
     public static async Task ReapplyAsync(HttpContext ctx)
     {
-        var provider = ctx.RequestServices.GetRequiredService<Microsoft.AspNetCore.Cors.Infrastructure.ICorsPolicyProvider>();
-        var service = ctx.RequestServices.GetRequiredService<ICorsService>();
+        var sp = ctx.RequestServices;
+        if (sp is null) return;                                   // bare DefaultHttpContext in unit tests: nothing to reapply
+        var provider = sp.GetService<ICorsPolicyProvider>();
+        var service = sp.GetService<ICorsService>();
+        if (provider is null || service is null) return;          // CORS not registered
         var policy = await provider.GetPolicyAsync(ctx, CorsPolicies.Frontend);
         if (policy is null) return;
         service.ApplyResult(service.EvaluatePolicy(ctx, policy), ctx.Response);
