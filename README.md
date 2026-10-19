@@ -1,4 +1,4 @@
-> **STATUS (submitted 2026-10-13 23:38):** Work in progress. Added so far: `ApiRoutes`, CORS / rate-limiting setup files, home-screen DTO and controller. Not yet wired in or finished: route versioning in controllers, CORS and rate limiter in the pipeline, `HomeService`, strict number handling, TypeScript client, tests. The sections below describe the intended design.
+﻿> **STATUS (submitted 2026-10-13 23:38):** Work in progress. Added so far: `ApiRoutes`, CORS / rate-limiting setup files, home-screen DTO and controller. Not yet wired in or finished: route versioning in controllers, CORS and rate limiter in the pipeline, `HomeService`, strict number handling, TypeScript client, tests. The sections below describe the intended design.
 # RondiTrack API (Week 4, Day 1)
 
 A .NET 10 Web API for tracking stokvels and their members, with in-memory data.
@@ -925,3 +925,113 @@ info: RondiTrack.Auth.StokvelAccess[0]
 
 - The policy is named once (`CorsPolicies.Frontend`). Controllers do not mention CORS.
 - **Preflight vs the 6.1 fallback policy:** `UseCors` runs before `UseAuthentication` and `UseAuthorization`.
+
+
+
+
+[![CI](https://github.com/mathabomohapi99-crypto/<<REPO>>/actions/workflows/ci.yml/badge.svg)](https://github.com/mathabomohapi99-crypto/<<REPO>>/actions/workflows/ci.yml)
+
+
+# Assignment 6.3: Ready for the Frontend
+
+## Versioning
+Every route is under `/api/v1`, defined once in `ApiRoutes.V1`. The refresh cookie `Path` moved with it to `/api/v1/auth` (`AuthConstants.RefreshCookiePath`). Test: `Refresh_works_at_versioned_path`. `/health/*` is not versioned (infrastructure probes, not API contract). Existing tests had only their URLs changed.
+
+## CORS
+Origins come from `Cors:AllowedOrigins` (`http://localhost:3000` in Development, empty list in appsettings.json). `AllowCredentials()`, methods and headers listed explicitly (incl. `Idempotency-Key`, `If-Match`), exposed: `Retry-After`, `Idempotency-Replayed`, `ETag`, `Location`. No wildcard, no origin reflection (startup throws on `*` or a trailing slash). `UseCors` runs before authentication so preflights (no token) succeed despite the fallback policy, and `RondiExceptionHandler` re-applies CORS headers because `UseExceptionHandler` clears them, so 404/403/409/500 are readable by the browser.
+
+**Will the refresh cookie reach the API?** (origin = scheme+host+port; site = registrable domain; cookie is `SameSite=Strict`)
+| From -> To | Same origin? | Same site? | Cookie sent? |
+|---|---|---|---|
+| `localhost:3000` -> `localhost:5134/8080` | No (port) | Yes (ports ignored) | Yes, with `credentials: "include"`. Chrome/Firefox accept `Secure` cookies on `http://localhost`; Safari does not |
+| `app.ronditrack.co.za` -> `api.ronditrack.co.za` | No (host) | Yes (`ronditrack.co.za`) | Yes. Cross-origin but same-site, so Strict allows it |
+| `ronditrack.vercel.app` -> `ronditrack-api.azurewebsites.net` | No | **No** | **No.** Cross-site, so Strict is dropped. It would need `SameSite=None; Secure` plus CSRF protection, and browsers that block third-party cookies still break it. Fix: put both under one parent domain |
+
+## Rate limiting
+| Policy | Algorithm | Partition | Why |
+|---|---|---|---|
+| login | Fixed window (limit/window from config) | IP | Password guessing is per source |
+| contribution, payout | Token bucket (config) | Signed-in user id (`sub`) | A treasurer records ~20 after a meeting, then nothing for a month. The bucket allows that burst and refills slowly. A fixed window would punish the burst |
+
+Every rejection: 429 (not 503), `Retry-After`, problem+json with title, detail, `correlationId`. Policies are named once in `PolicyNames.cs`; controllers only reference them.
+
+**Pipeline order: CORS -> authentication -> rate limiting -> authorization -> idempotency (inside the service).** CORS first so the browser can read every answer. Authentication before rate limiting because the money limits need the user id. Rate limiting before idempotency, so a request that is rejected never reaches the idempotency store.
+
+**Idempotency under 429:** the limiter answers before any idempotency code runs, so a rejected key is never stored. Test `Rejected_request_does_not_use_its_idempotency_key`: limit hit -> 429 for key K -> wait out the window -> K succeeds once -> K again replays -> exactly one contribution row.
+
+**Three instances behind a load balancer:** limiter state is per process, so the real limit is up to 3x (a user pinned to one instance sees the configured limit, a spread-out one sees more). Fix: a shared store (Redis) or limits at the gateway.
+**A whole stokvel on one venue Wi-Fi:** the login limit is per IP, so members logging in together can hit it (shared NAT IP). Money limits are per user and are not affected. Mitigation: raise the login limit or add a per-account limit.
+
+## Home screen `GET /api/v1/me/home`
+One call, every stokvel of the caller. Per stokvel: `stokvelId` (to navigate), `name`, caller's `role` (a name), `currentCycle` (id, status name, startsAt/endsAt UTC), `paidCents`, `owedCents`, `nextPayoutAt` (UTC). Everything is calculated on the server with `TimeProvider`. Only the caller's own payments are included, never other members' amounts. **Money is integer cents:** a JavaScript number holds integers exactly up to 2^53, while decimals like 0.1 + 0.2 drift. A user in no stokvels gets `{"stokvels": []}`, not 404.
+
+## Error contract
+All errors are `application/problem+json` with `correlationId` (the W3C trace id from 6.2).
+| Status | Comes from | Shape |
+|---|---|---|
+| 400 validation | FluentValidation, or bad JSON / number-as-string (model binding) | `{title:"Validation Failed", status, detail, errors:{camelCaseField:["msg"]}, correlationId}` |
+| 400 other | `DomainValidationException`, `ApiBadRequestException` (bad page token, bad If-Match, missing Idempotency-Key) | `{title:"Bad Request", status, detail, correlationId}` |
+| 401 | No/invalid token (`ProblemAuthorizationResultHandler`); wrong login; bad refresh token | `{title:"Unauthorized", status, detail, correlationId}` + `WWW-Authenticate: Bearer` |
+| 403 | Member without the role; not your account | `{title:"Forbidden", ...}` |
+| 404 | Not found, or you are not a member (same body on purpose) | `{title:"Not Found", ...}` |
+| 409 | Domain conflict; unique index violation (23505); xmin conflict without `If-Match` | `{title:"Conflict", ...}` |
+| 412 | Stale `If-Match` | `{title:"Precondition Failed", ...}` |
+| 422 | Reference does not resolve (user not in stokvel) | `{title:"Unprocessable Entity", ...}` |
+| 428 | PUT without `If-Match` | `{title:"Precondition Required", ...}` |
+| 429 | Rate limiter | `{title:"Too many requests", status, detail, type, correlationId}` + `Retry-After` |
+| 500 | Anything unhandled | `{title:"Internal Server Error", detail:"An unexpected error occurred.", correlationId}`: no type name, stack or message |
+
+Numbers must be numbers: `NumberHandling.Strict` (MVC and OpenAPI) makes `"maxMembers":"5"` a 400, and the OpenAPI document lists integers/decimals as plain `integer`/`number`.
+
+## TypeScript contract
+`cd clients/typescript && npm install && npm run all` (API running) generates `src/schema.d.ts` and runs `tsc --noEmit --strict`.
+Result now: <<TODO paste: no output = success>>
+After renaming `OwedCents` to `OwingCents` in C#: <<TODO paste compiler error, e.g. Property 'owedCents' does not exist ...>>. Reverted.
+
+## Tests (dev database stopped)
+<<TODO paste `dotnet test` summary>>. Tests use only the Testcontainers database.
+
+## Gaps not closed (6.3)
+- Rate-limit state is per instance (see above).
+- Framework-generated errors that never reach my handler (e.g. 415 unsupported media type) are not audited.
+- <<add anything else you really skipped>>
+
+# Assignment 6.4: Shipped, Scheduled and Handed Over
+
+[Red CI run](<<TODO link>>) | [Green CI run](<<TODO link>>) (broken-test PR #<<TODO>> stays in history)
+
+## Container image
+- Multi-stage `Dockerfile`: csproj files are copied and restored first (cached), then source; the runtime stage holds only `/app/publish`; runs as the image's non-root `app` user; listens on 8080; image tags pinned (`10.0`, `postgres:17.6-alpine`).
+- `.dockerignore` keeps out `bin/`, `obj/`, `.git/`, test results, `.env`.
+- **Image size:** <<TODO `docker images ronditrack-api:local`>>
+- **Rebuild time:** first build `<<TODO>>` s (`docker compose build --no-cache api`); after changing one `.cs` file `<<TODO>>` s. The `dotnet restore` layer is reused because only `.csproj` files were copied before it.
+- **Why the test project is not in the image:** tests are for the build machine, not the running service. Shipping them adds size, test packages and attack surface, and the image would need Docker (Testcontainers) to be useful.
+- **Fails fast with no configuration:** `docker run --rm ronditrack-api:local` stops at startup with `Set ConnectionStrings:RondiTrack (...)` (then `Jwt:SigningKey ...`). Output: <<TODO paste>>.
+
+### No secrets in the image
+## Frontend
+
+### 1. The useMemo note
+In `StokvelCard` I was tempted to wrap the formatted amounts (`formatCents(paidCents)` and `formatCents(owedCents)`) in `useMemo`, so they would not be recalculated on every render. I did not need it: the React Compiler (enabled by the `react-compiler-ts` template) memoises pure render values automatically, and formatting a number is cheap. The code has no `useMemo`, `useCallback` or `React.memo`.
+
+### 2. How the role reaches the card
+The role comes from that stokvel's own entry in `/me/home` (`role`), and `App` passes the entry to `StokvelCard` as props. There is no global role, no context, and the role is not read from the token. Lerato's two cards differ from their props alone: the Treasurer card renders the "Treasurer jobs" section and the Member card does not render it at all. Hiding is not security: the API still returns 403 to a Member who calls a treasurer-only endpoint, checked against the database.
+
+### 3. Status and role strings
+Both. The API publishes `StokvelRole` as the generated union `"Member" | "Treasurer" | "Admin"` and `CycleStatus` as `"Open" | "PaidOut"`. The comparison also lives in one tested helper, `src/lib/roles.ts` (`isTreasurer`, `roleLabel`), covered by `roles.test.ts` including a typo case (`'Treasuer'`).
+
+### 4. Handoff gaps found
+Found while reading my own API contract. Not yet fixed in the API:
+- `HomeCycleDto` has no cycle number or name, so the card shows the cycle's start and end dates only.
+- `ContributionDetailResponse` (contributions list) sends `amount` as a decimal rather than integer cents, has no Pending/Paid/Confirmed status, has no cycle, and exposes `memberEmail`. Because of this the ContributionCard is not built yet.
+- There is no `docker-compose.yml`; the API runs with `dotnet run --project API\API.csproj`.
+
+### 5. How to run the frontend
+```bash
+dotnet run --project API\API.csproj   # API on http://localhost:5134
+cd web
+npm install
+npm run generate:api                  # with the API running
+npm run dev                           # http://localhost:3000
+```
+Checks: `npm run typecheck`, `npm run lint`, `npx vitest run`, `npm run build`.

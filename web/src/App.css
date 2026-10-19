@@ -1,0 +1,37 @@
+/* CHANGED: plain, readable styles only (Tailwind comes on Day 2) */
+main {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 1rem;
+  font-family: system-ui, sans-serif;
+  text-align: left;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+.column {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.card {
+  border: 1px solid #999;
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  min-width: 260px;
+}
+
+.role {
+  font-weight: bold;
+}
+
+.treasurer {
+  margin-top: 0.75rem;
+  padding-top: 0.5rem;
+  border-top: 1px dashed #999;
+}

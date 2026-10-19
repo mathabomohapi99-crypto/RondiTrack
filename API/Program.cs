@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using FluentValidation;
@@ -154,7 +154,7 @@ builder.Services.AddScoped<IRefreshTokenRepository, EfRefreshTokenRepository>();
 builder.Services.AddScoped<IAuthService, AuthService>();
 
 builder.Services.AddSingleton(TimeProvider.System);   // tests swap this for FakeTimeProvider
-builder.Services.AddScoped<IIdempotencyStore, EfIdempotencyStore>();   // 6.4: was Singleton in-memory. Now in PostgreSQL (Scoped, it uses the DbContext)
+builder.Services.AddSingleton<IIdempotencyStore, InMemoryIdempotencyStore>();   // TEMP 7.1: EfIdempotencyStore file is missing, restore later   // 6.4: was Singleton in-memory. Now in PostgreSQL (Scoped, it uses the DbContext)
 
 builder.Services.AddScoped<IUserRepository, EfUserRepository>();
 builder.Services.AddScoped<IStokvelRepository, EfStokvelRepository>();
