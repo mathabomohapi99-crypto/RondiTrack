@@ -1035,3 +1035,51 @@ npm run generate:api                  # with the API running
 npm run dev                           # http://localhost:3000
 ```
 Checks: `npm run typecheck`, `npm run lint`, `npx vitest run`, `npm run build`.
+
+
+
+
+
+
+## Frontend 7.2: styled, responsive stokvel view
+
+### 1. StrictMode evidence
+Not captured yet. The design reason for the cleanup in `DueCountdown` is that StrictMode mounts, unmounts and mounts the component again in development. Without a cleanup, the first timer would never be cleared, so two timer chains would run. Console output (with and without the cleanup) will be added in a follow-up commit.
+
+### 2. Where the open/closed state lives
+The set of open groups lives in `ContributionList`, the parent of all the groups. It could not stay inside each group because "Expand all / Collapse all" lives in the list and must change every group at once, and the list also needs it to work out the button label. It is keyed by cycle id, not by position: when a new cycle opens, every group moves down one place, so position-based state would expand the wrong cycle. The button label is derived from the set, not stored.
+
+### 3. The effect's dependency array
+`DueCountdown`'s effect depends on `[now, cycleStatus]`. It reads `now` to work out how long until the next Johannesburg midnight, and it must run again when `now` changes, because that is what schedules the next timer after one fires. An empty `[]` would schedule only the first midnight and then never again. The effect does nothing when the cycle is not Open.
+
+### 4. The due-date decision
+The API sends instants (UTC, ending in Z). A cycle's due date comes from the cycle's `EndsOn` calendar date, which the API turns into 23:59:59 South African time on that day (21:59:59Z), because a member may pay at any time that day. `dueDateToDeadline` also handles a plain `"2026-10-31"` (it becomes `2026-10-31T22:00:00Z`). The countdown counts South African calendar days. If the API says a cycle is Closed or PaidOut, no countdown shows: the server's clock decides, not the device's clock.
+
+### 5. StatusBadge design
+`StatusBadge` takes a `kind` (`cycle` or `contribution`) as well as a status, because "Paid" (a member's claim) and "PaidOut" (the whole pot went out) must never look alike. Cycle `PaidOut` shows "Paid out" with a banknote icon in violet; contribution `Paid` shows "Paid, awaiting check" with a single tick in sky blue; `Confirmed` shows a double tick in green. Every badge has a word, an icon and a tone. An unknown value shows its raw text in a neutral badge. Role stays plain text on the card.
+
+### 6. Contrast
+Not measured yet. The values for each badge in Light and Dark will be added in a follow-up commit.
+
+### 7. The audit
+`npm audit --omit=dev` (production dependencies only) reports 0 vulnerabilities. Findings in the full `npm audit` come from dev tooling such as the shadcn CLI, which only runs on my laptop and is not in the production bundle. The package names will be added in a follow-up commit.
+
+### 8. Screenshots (360px, every group expanded)
+![Light theme at 360px](docs/ui-360-light.png)
+
+Dark theme screenshot: to be added.
+
+### Theme and shared phones
+The theme is a device setting, not personal, so it is kept in `localStorage` with a guarded read and write. Pinned stokvels (Assignment 8.4) are personal: they must be stored per user id and cleared on logout, so the next person on a shared phone doesn't see them.
+
+### 9. Handoff gaps fixed in the API (each with a test in `StokvelViewContractTests`)
+- `GET /stokvels/{id}/cycles` now returns newest first with status (Open, Closed or PaidOut), due date, `collectedCents` and `dueCents`.
+- Contributions now carry `cycleId`, `amountCents` (integer cents) and `status` (Pending, Paid or Confirmed, new database column), and no longer send `memberEmail`.
+- `/me/home` now returns the cycle `number` and `arrearsCents` (the caller's own only, null when none), a closed cycle is no longer the current cycle, and its dates are UTC instants ending in Z.
+- Migration `Add64JobsAndContributionStatus` creates the 6.4 tables and columns (`Arrears`, `IdempotencyEntries`, `ClosedAtUtc`, `EndsOn`).
+- Seed: Ubuntu Savers has cycles PaidOut, Closed and Open; Thandi is Treasurer there and a Member in Festive Grocery Club, where she is in arrears.
+
+### Test results
+Backend: 97 of 97 tests pass. Frontend: typecheck, lint, 33 unit tests and the production build all pass.
+
+Known gaps still open: contributions are listed per cycle (there is no stokvel-wide GET yet); `EfIdempotencyStore` is still missing, so `Program.cs` uses the in-memory store (marked TEMP); there is no `docker-compose.yml`.
