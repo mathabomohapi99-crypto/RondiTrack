@@ -228,9 +228,9 @@ export interface paths {
                         [name: string]: unknown;
                     };
                     content: {
-                        "text/plain": components["schemas"]["ContributionCycleResponse"][];
-                        "application/json": components["schemas"]["ContributionCycleResponse"][];
-                        "text/json": components["schemas"]["ContributionCycleResponse"][];
+                        "text/plain": components["schemas"]["CycleSummaryResponse"][];
+                        "application/json": components["schemas"]["CycleSummaryResponse"][];
+                        "text/json": components["schemas"]["CycleSummaryResponse"][];
                     };
                 };
                 /** @description Unauthorized */
@@ -1943,14 +1943,16 @@ export interface components {
             /** Format: uuid */
             id: string;
             /** Format: uuid */
+            cycleId: string;
+            /** Format: uuid */
             userId: string;
             memberName: string;
-            memberEmail: string;
             role: components["schemas"]["StokvelRole"];
             /** Format: int32 */
             rotationPosition: number;
-            /** Format: double */
-            amount: number;
+            /** Format: int64 */
+            amountCents: number;
+            status: components["schemas"]["ContributionStatus"];
             /** Format: date-time */
             recordedAtUtc: string;
         };
@@ -1979,10 +1981,29 @@ export interface components {
             recordedAtUtc: string;
         };
         /** @enum {unknown} */
-        CycleStatus: "Open" | "PaidOut";
+        ContributionStatus: "Paid" | "Pending" | "Confirmed";
+        /** @enum {unknown} */
+        CycleStatus: "Open" | "PaidOut" | "Closed";
+        CycleSummaryResponse: {
+            /** Format: uuid */
+            id: string;
+            /** Format: int32 */
+            number: number;
+            status: components["schemas"]["CycleStatus"];
+            /** Format: date-time */
+            startsAt: string;
+            /** Format: date-time */
+            endsAt: string;
+            /** Format: int64 */
+            collectedCents: number;
+            /** Format: int64 */
+            dueCents: number;
+        };
         HomeCycleDto: {
             /** Format: uuid */
             id: string;
+            /** Format: int32 */
+            number: number;
             status: components["schemas"]["CycleStatus"];
             /** Format: date-time */
             startsAt: string;
@@ -2004,6 +2025,8 @@ export interface components {
             owedCents: number;
             /** Format: date-time */
             nextPayoutAt: null | string;
+            /** Format: int64 */
+            arrearsCents: null | number;
         };
         LoginRequest: {
             email: string;
