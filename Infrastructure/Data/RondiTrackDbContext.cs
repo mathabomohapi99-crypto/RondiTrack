@@ -87,6 +87,7 @@ public class RondiTrackDbContext : DbContext
         {
             e.HasKey(c => c.Id);
             e.Property(c => c.Amount).HasPrecision(18, 2);
+            e.Property(c => c.Status).HasConversion<string>().HasMaxLength(20).HasDefaultValue(ContributionStatus.Paid);   // 7.2
 
             // CHANGED 5.3: now UNIQUE. Database-level version of the C# rule
             // "a member contributes once per cycle" (ContributionService -> ExistsAsync).

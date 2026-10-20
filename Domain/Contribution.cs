@@ -9,6 +9,9 @@ public sealed class Contribution
     public decimal Amount { get; private set; }
     public DateTime RecordedAtUtc { get; private set; }
 
+    // NEW 7.2: Paid by default (a member recorded it). The treasurer's check moves it to Confirmed.
+    public ContributionStatus Status { get; private set; } = ContributionStatus.Paid;
+
     // Points at ONE specific membership (composite foreign key UserId + StokvelId)
     public StokvelMember Member { get; private set; } = null!;
 

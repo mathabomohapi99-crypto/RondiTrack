@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using FluentValidation;
@@ -169,6 +169,7 @@ builder.Services.AddScoped<IContributionService, ContributionService>();
 builder.Services.AddScoped<IPayoutFaultHook, NoOpPayoutFaultHook>();
 builder.Services.AddScoped<IPayoutService, PayoutService>();
 builder.Services.AddScoped<IHomeService, HomeService>();
+builder.Services.AddScoped<ICycleSummaryService, CycleSummaryService>();   // 7.2
 
 // ---------- Background jobs (6.4) ----------
 builder.Services.Configure<CycleCloseOptions>(builder.Configuration.GetSection("Jobs:CycleClose"));      // 6.4

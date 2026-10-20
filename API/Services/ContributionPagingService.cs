@@ -1,17 +1,16 @@
 using System.Globalization;
 using Microsoft.EntityFrameworkCore;
 using RondiTrack.Api.Common.Paging;
+using RondiTrack.Common;
 using RondiTrack.Data;
 using RondiTrack.Domain;
 using RondiTrack.Dtos;
 
 namespace RondiTrack.Services;
 
-// CHANGED: rewritten for your real names (RondiTrackDbContext, Guid ids, RecordedAtUtc).
-// The whole query is built as IQueryable, so WHERE / ORDER BY / LIMIT run inside PostgreSQL.
+// CHANGED 7.2: the rows now carry CycleId, integer cents and Status, and no email.
 public sealed class ContributionPagingService(RondiTrackDbContext db)
 {
-    // The ONLY sorts a client may ask for. Anything else is a 400.
     private static readonly string[] AllowedSorts = ["date", "-date", "amount", "-amount"];
 
     public async Task<PagedResponse<ContributionDetailResponse>> ListAsync(
@@ -49,14 +48,13 @@ public sealed class ContributionPagingService(RondiTrackDbContext db)
             query = query.Where(c => c.RecordedAtUtc <= t);
         }
 
-        // Fingerprint of sort + filters, stored inside every token we hand out.
         var context = PageTokenCodec.ContextOf(
             sort, cycleId, q.UserId, from?.ToString("O"), to?.ToString("O"));
 
         if (!string.IsNullOrEmpty(q.PageToken))
         {
             var cursor = PageTokenCodec.Decode(q.PageToken, context);
-            query = ApplyAfterCursor(query, sort, cursor);   // keyset: "rows after the last one you saw"
+            query = ApplyAfterCursor(query, sort, cursor);
         }
 
         query = ApplyOrder(query, sort);
@@ -64,28 +62,36 @@ public sealed class ContributionPagingService(RondiTrackDbContext db)
         // Ask for ONE extra row. If it comes back, there is a next page.
         var rows = await query
             .Take(pageSize + 1)
-            .Select(c => new ContributionDetailResponse(
-                c.Id, c.UserId, c.Member.User.FullName, c.Member.User.Email,
-                c.Member.Role, c.Member.RotationPosition, c.Amount, c.RecordedAtUtc))
+            .Select(c => new
+            {
+                c.Id, c.CycleId, c.UserId,
+                MemberName = c.Member.User.FullName,
+                c.Member.Role, c.Member.RotationPosition,
+                c.Amount, c.Status, c.RecordedAtUtc
+            })
             .ToListAsync(ct);
 
         var hasMore = rows.Count > pageSize;
-        var page = rows.Take(pageSize).ToList();
+        var pageRows = rows.Take(pageSize).ToList();
 
         var next = "";
         if (hasMore)
         {
-            var last = page[^1];
+            var last = pageRows[^1];
             var lastValue = sort.EndsWith("date")
                 ? last.RecordedAtUtc.ToString("O", CultureInfo.InvariantCulture)
                 : last.Amount.ToString(CultureInfo.InvariantCulture);
             next = PageTokenCodec.Encode(new PageCursor(context, lastValue, last.Id));
         }
 
+        // money becomes integer cents here
+        var page = pageRows.Select(r => new ContributionDetailResponse(
+            r.Id, r.CycleId, r.UserId, r.MemberName, r.Role, r.RotationPosition,
+            Money.ToCents(r.Amount), r.Status, r.RecordedAtUtc)).ToList();
+
         return new PagedResponse<ContributionDetailResponse>(page, next);
     }
 
-    // Every sort ends with Id, so rows with equal date/amount always come in the same order.
     private static IQueryable<Contribution> ApplyOrder(IQueryable<Contribution> q, string sort) => sort switch
     {
         "date"   => q.OrderBy(c => c.RecordedAtUtc).ThenBy(c => c.Id),
@@ -94,7 +100,6 @@ public sealed class ContributionPagingService(RondiTrackDbContext db)
         _        => q.OrderByDescending(c => c.Amount).ThenByDescending(c => c.Id),
     };
 
-    // Keyset condition: rows that come AFTER (lastValue, lastId) in the chosen order.
     private static IQueryable<Contribution> ApplyAfterCursor(
         IQueryable<Contribution> q, string sort, PageCursor cur)
     {
@@ -120,7 +125,6 @@ public sealed class ContributionPagingService(RondiTrackDbContext db)
             : q.Where(c => c.Amount < a || (c.Amount == a && c.Id.CompareTo(lastId) < 0));
     }
 
-    // npgsql only accepts UTC for timestamptz, so a date typed by a client is treated as UTC.
     private static DateTime? ToUtc(DateTime? value) => value is null ? null
         : value.Value.Kind == DateTimeKind.Utc ? value
         : value.Value.Kind == DateTimeKind.Local ? value.Value.ToUniversalTime()

@@ -1,3 +1,4 @@
+using RondiTrack.Tests.TestSupport;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -13,7 +14,8 @@ namespace RondiTrack.Tests;
 
 // 6.3: what a BROWSER needs: CORS, 429 contract, idempotency under 429, home screen, error contract
 // ADJUST: if your other tests get the factory differently (collection fixture), change this constructor.
-public class FrontendContractTests(PostgresApiFactory factory) : IClassFixture<PostgresApiFactory>
+[Collection("Postgres collection")]
+public class FrontendContractTests(PostgresApiFactory factory)
 {
     // 6.3: each test builds its OWN host with its OWN settings, so it never uses up the shared allowance
     private WebApplicationFactory<Program> With(params (string Key, string Value)[] settings) =>

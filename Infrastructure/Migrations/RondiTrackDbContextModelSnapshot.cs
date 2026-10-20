@@ -22,6 +22,35 @@ namespace RondiTrack.Migrations
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
 
+            modelBuilder.Entity("RondiTrack.Domain.Arrear", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("CycleId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("RecordedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<long>("ShortfallCents")
+                        .HasColumnType("bigint");
+
+                    b.Property<Guid>("StokvelId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CycleId", "UserId")
+                        .IsUnique();
+
+                    b.ToTable("Arrears");
+                });
+
             modelBuilder.Entity("RondiTrack.Domain.Contribution", b =>
                 {
                     b.Property<Guid>("Id")
@@ -37,6 +66,13 @@ namespace RondiTrack.Migrations
 
                     b.Property<DateTime>("RecordedAtUtc")
                         .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)")
+                        .HasDefaultValue("Paid");
 
                     b.Property<Guid>("StokvelId")
                         .HasColumnType("uuid");
@@ -63,11 +99,17 @@ namespace RondiTrack.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
+                    b.Property<DateTime?>("ClosedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<DateTime>("CreatedAtUtc")
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<int>("CycleNumber")
                         .HasColumnType("integer");
+
+                    b.Property<DateOnly?>("EndsOn")
+                        .HasColumnType("date");
 
                     b.Property<string>("Status")
                         .IsRequired()
@@ -89,9 +131,37 @@ namespace RondiTrack.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("EndsOn")
+                        .HasDatabaseName("IX_ContributionCycles_EndsOn_Open")
+                        .HasFilter("\"ClosedAtUtc\" IS NULL");
+
                     b.HasIndex("StokvelId", "CycleNumber");
 
                     b.ToTable("ContributionCycles");
+                });
+
+            modelBuilder.Entity("RondiTrack.Domain.IdempotencyEntry", b =>
+                {
+                    b.Property<string>("Key")
+                        .HasColumnType("text");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("RequestHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("ResponseJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("Key");
+
+                    b.HasIndex("CreatedAtUtc");
+
+                    b.ToTable("IdempotencyEntries");
                 });
 
             modelBuilder.Entity("RondiTrack.Domain.Payout", b =>
@@ -168,6 +238,8 @@ namespace RondiTrack.Migrations
                         .HasColumnType("uuid");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("ExpiresAtUtc");
 
                     b.HasIndex("FamilyId");
 
@@ -281,6 +353,15 @@ namespace RondiTrack.Migrations
                         .IsUnique();
 
                     b.ToTable("Users");
+                });
+
+            modelBuilder.Entity("RondiTrack.Domain.Arrear", b =>
+                {
+                    b.HasOne("RondiTrack.Domain.ContributionCycle", null)
+                        .WithMany()
+                        .HasForeignKey("CycleId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("RondiTrack.Domain.Contribution", b =>

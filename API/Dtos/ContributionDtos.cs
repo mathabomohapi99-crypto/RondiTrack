@@ -12,13 +12,14 @@ public sealed record ContributionResponse(
     decimal Amount,
     DateTime RecordedAtUtc);
 
-// New. The shape the contributions-by-cycle endpoint returns
+// CHANGED 7.2: CycleId added, Amount is now integer cents (AmountCents), Status added, MemberEmail removed (nothing extra)
 public sealed record ContributionDetailResponse(
     Guid Id,
+    Guid CycleId,
     Guid UserId,
     string MemberName,
-    string MemberEmail,
     StokvelRole Role,
     int RotationPosition,
-    decimal Amount,
+    long AmountCents,
+    ContributionStatus Status,
     DateTime RecordedAtUtc);

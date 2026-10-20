@@ -1,3 +1,4 @@
+using RondiTrack.Tests.TestSupport;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -12,7 +13,8 @@ using RondiTrack.Jobs;
 namespace RondiTrack.Tests;
 
 // 6.4: housekeeping must delete old rows WITHOUT weakening reuse detection or idempotency
-public class HousekeepingTests(PostgresApiFactory factory) : IClassFixture<PostgresApiFactory>
+[Collection("Postgres collection")]
+public class HousekeepingTests(PostgresApiFactory factory)
 {
     private static string RandomHash() => Convert.ToHexString(RandomNumberGenerator.GetBytes(32));   // 64 hex chars
 

@@ -1,3 +1,4 @@
+using RondiTrack.Tests.TestSupport;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -10,7 +11,8 @@ using RondiTrack.Jobs;
 namespace RondiTrack.Tests;
 
 // 6.4: cycle-close job. Every test builds its own stokvel and passes ITS id to RunOnceAsync, so tests never touch each other's data.
-public class CycleCloseTests(PostgresApiFactory factory) : IClassFixture<PostgresApiFactory>
+[Collection("Postgres collection")]
+public class CycleCloseTests(PostgresApiFactory factory)
 {
     // SAST = UTC+2 all year (no daylight saving)
     private static DateTimeOffset Sast(int y, int m, int d, int h, int min) =>
