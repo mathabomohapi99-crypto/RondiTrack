@@ -25,3 +25,8 @@ export function formatCents(cents: number): string {
   // Intl accepts an exact decimal string, so it formats without turning it into a float
   return zarFormatter.format(decimal as `${number}`)
 }
+
+// Step 7 name: later files import formatRand, so it forwards to formatCents
+export function formatRand(value: number): string {
+  return formatCents(value)
+}

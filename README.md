@@ -1083,3 +1083,96 @@ The theme is a device setting, not personal, so it is kept in `localStorage` wit
 Backend: 97 of 97 tests pass. Frontend: typecheck, lint, 33 unit tests and the production build all pass.
 
 Known gaps still open: contributions are listed per cycle (there is no stokvel-wide GET yet); `EfIdempotencyStore` is still missing, so `Program.cs` uses the in-memory store (marked TEMP); there is no `docker-compose.yml`.
+
+
+
+
+
+## Assignment 7.3: Live data
+
+### API contract notes
+1. **CORS:** NOT VERIFIED yet. The intended setup is allow origin http://localhost:3000 with credentials and expose `Retry-After`.
+2. **Refresh cookie:** NOT VERIFIED yet. The refresh token is rotating and sent with `credentials: 'include'`.
+3. **/me/home** returns the member's role per stokvel (`HomeStokvelDto.role`). My API has no `GET /me` endpoint, so I did not write `useMe`.
+4. **"No next page":** `nextPageToken` is a non-nullable string in my schema, so the last page returns an empty string. The frontend uses `nextPageToken || undefined`, which handles both `""` and `null`.
+5. **Two refreshes at once with the same cookie:** NOT VERIFIED yet. Because the refresh cookie rotates, a second refresh sent with an already-used cookie can be rejected. This is why the frontend refresh is single-flight.
+
+API fixes made: none yet (see Known gaps).
+
+### Single-flight proof
+Failing output with the single-flight line replaced by a plain `return doRefresh()` (3 of 5 tests fail, the refresh count is 5 instead of 1):
+
+```
+ FAIL  src/auth/session.test.ts > session > five parallel 401s cause exactly one refresh
+AssertionError: expected 5 to be 1 // Object.is equality
+- Expected
++ Received
+- 1
++ 5
+ > src/auth/session.test.ts:54:31
+     54|     expect(fake.refreshCount).toBe(1);
+
+ FAIL  src/auth/session.test.ts > session > a later expiry starts a new refresh
+AssertionError: expected 5 to be 1 // Object.is equality
+ > src/auth/session.test.ts:61:31
+     61|     expect(fake.refreshCount).toBe(1);
+
+ FAIL  src/auth/session.test.ts > session > a failed refresh signs out once
+AssertionError: expected "vi.fn()" to be called 1 times, but got 2 times
+ > src/auth/session.test.ts:77:23
+     77|     expect(signedOut).toHaveBeenCalledTimes(1);
+
+ Test Files  1 failed (1)
+      Tests  3 failed | 2 passed (5)
+```
+
+Passing output after putting the single-flight code back:
+
+```
+ RUN  v5.0.5
+ OK src/auth/session.test.ts (5 tests)
+
+ Test Files  1 passed (1)
+      Tests  5 passed (5)
+```
+
+The fake API delays the refresh by 20 ms so the five requests really overlap, and it handles both `Request` objects and string URLs.
+
+### Stokvel switch proof
+Failing output with `placeholderData: keepPreviousData` added to the contributions query (Mabena's R 111,11 stays on screen under the "Soweto Teachers" heading):
+
+```
+ FAIL  src/components/StokvelSwitch.test.tsx > stokvel switching > never shows the previous stokvel amounts right after switching
+AssertionError: expected '... Soweto TeachersCycle 1Total shown: R 111,11Thandi Mabena: R 111,11 (Paid)' not to contain 'R 111,11'
+ > src/components/StokvelSwitch.test.tsx:70:43
+     70|     expect(document.body.textContent).not.toContain(formatCentsAsRand(11111));
+
+ Test Files  1 failed (1)
+      Tests  1 failed (1)
+```
+
+Passing output without it:
+
+```
+ RUN  v5.0.5
+ OK src/components/StokvelSwitch.test.tsx (1 test)
+   OK stokvel switching > never shows the previous stokvel amounts right after switching
+
+ Test Files  1 passed (1)
+      Tests  1 passed (1)
+```
+
+The fake API answers stokvel "b" after 150 ms, so the old rows would stay on screen if the bug existed.
+
+**Money:** my API returns whole cents (`amountCents`), which avoids floating point errors (in JSON, 0.1 + 0.2 = 0.30000000000000004). The frontend divides by 100 only when displaying, using `Intl.NumberFormat('en-ZA', { style: 'currency', currency: 'ZAR' })`.
+
+### Shared phone check
+NOT VERIFIED in a browser yet. What is implemented: signing out (button or failed refresh) clears the TanStack Query cache with `queryClient.clear()` and clears the selected stokvel id. The selected id is kept in memory only, never in browser storage. The only `localStorage` use in `src/` is the theme.
+No URL state yet (routing arrives in Week 8).
+
+### Known gaps
+- Browser checks 1, 2 and 5 from "Before you start" and the shared phone steps were not run before submission, and there is no screenshot or screen recording yet.
+- My API has no `GET /me` endpoint, so `useMe` was not written.
+- `ProblemDetails` in the OpenAPI schema has no `correlationId`, although the error view reads it from the real response. The fix belongs in the API's OpenAPI annotations, followed by `npm run api:types`.
+- No routing yet, so the back button check does not apply.
+- Stretch challenges not attempted.

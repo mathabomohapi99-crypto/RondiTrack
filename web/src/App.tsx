@@ -1,33 +1,37 @@
-// CHANGED 7.2: mobile-first page. Base classes are the phone layout; md: only adds a second column.
-import { ContributionList } from '@/components/ContributionList'
-import { StokvelCard } from '@/components/StokvelCard'
-import { ThemeToggle } from '@/components/ThemeToggle'
-import { contributions, cycles, home } from '@/data/sample'
+import { useEffect, useState } from 'react';
+import { logout, onSignedOut, refreshAccessToken } from './auth/session';
+import { Dashboard } from './components/Dashboard';
+import { LoginForm } from './components/LoginForm';
+import { queryClient } from './lib/queryClient';
+import { clearSelectedStokvel } from './state/selectedStokvel';
 
-function App() {
+type Status = 'checking' | 'signedIn' | 'signedOut';
+
+export default function App() {
+  const [status, setStatus] = useState<Status>('checking');
+
+  useEffect(() => {
+    // Sign-out (button OR failed refresh): show the form, clear the cache AND the selected stokvel
+    const stopListening = onSignedOut(() => {
+      setStatus('signedOut');
+      clearSelectedStokvel();
+      queryClient.clear();
+    });
+    // After a page reload, try the cookie once to see if the member is still signed in
+    void refreshAccessToken().then((token) => setStatus(token ? 'signedIn' : 'signedOut'));
+    return stopListening;
+  }, []);
+
+  if (status === 'checking') return <p>Loading…</p>;
+  if (status === 'signedOut') return <LoginForm onSignedIn={() => setStatus('signedIn')} />;
+
   return (
-    <main className="mx-auto flex max-w-5xl flex-col gap-6 p-4">
-      <header className="flex flex-wrap items-center justify-between gap-2">
-        <h1 className="text-2xl font-bold">RondiTrack</h1>
-        <ThemeToggle />
+    <main style={{ maxWidth: 640, margin: '0 auto', padding: 16 }}>
+      <header style={{ display: 'flex', justifyContent: 'space-between' }}>
+        <h1>RondiTrack</h1>
+        <button onClick={() => void logout()}>Sign out</button>
       </header>
-
-      <section className="flex flex-col gap-3">
-        <h2 className="text-xl font-semibold">Lerato&apos;s stokvels</h2>
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-          {/* key is the stokvel's database id, never the array index */}
-          {home.map((entry) => (
-            <StokvelCard key={entry.stokvelId} {...entry} />
-          ))}
-        </div>
-      </section>
-
-      <section className="flex flex-col gap-3">
-        <h2 className="text-xl font-semibold">Contributions by cycle</h2>
-        <ContributionList cycles={cycles} contributions={contributions} />
-      </section>
+      <Dashboard />
     </main>
-  )
+  );
 }
-
-export default App
