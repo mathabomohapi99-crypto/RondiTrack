@@ -1086,18 +1086,16 @@ Known gaps still open: contributions are listed per cycle (there is no stokvel-w
 
 
 
-
-
 ## Assignment 7.3: Live data
 
 ### API contract notes
-1. **CORS:** NOT VERIFIED yet. The intended setup is allow origin http://localhost:3000 with credentials and expose `Retry-After`.
-2. **Refresh cookie:** NOT VERIFIED yet. The refresh token is rotating and sent with `credentials: 'include'`.
+1. **CORS:** The CORS policy in `CorsSetup.cs` allows the frontend origin with `AllowCredentials()` and exposes `Retry-After`. Sign-in from http://localhost:3000 works. The 429 wait-time message was not verified in the browser.
+2. **Refresh cookie:** `Set-Cookie: rondi_refresh=<redacted>; path=/api/v1/auth; secure; samesite=strict; httponly`. It is HttpOnly, rotating, and its path covers `/api/v1/auth`, so the browser sends it to `/auth/refresh`.
 3. **/me/home** returns the member's role per stokvel (`HomeStokvelDto.role`). My API has no `GET /me` endpoint, so I did not write `useMe`.
 4. **"No next page":** `nextPageToken` is a non-nullable string in my schema, so the last page returns an empty string. The frontend uses `nextPageToken || undefined`, which handles both `""` and `null`.
-5. **Two refreshes at once with the same cookie:** NOT VERIFIED yet. Because the refresh cookie rotates, a second refresh sent with an already-used cookie can be rejected. This is why the frontend refresh is single-flight.
+5. **Two refreshes at once with the same cookie:** I sent two `POST /api/v1/auth/refresh` requests at the same time with one cookie. One returned `200` and the other `401`. The refresh cookie is single-use, so the second request is rejected. This is why the frontend refresh is single-flight.
 
-API fixes made: none yet (see Known gaps).
+API fixes made: none needed. The CORS policy already allowed credentials and exposed `Retry-After`.
 
 ### Single-flight proof
 Failing output with the single-flight line replaced by a plain `return doRefresh()` (3 of 5 tests fail, the refresh count is 5 instead of 1):
@@ -1167,11 +1165,11 @@ The fake API answers stokvel "b" after 150 ms, so the old rows would stay on scr
 **Money:** my API returns whole cents (`amountCents`), which avoids floating point errors (in JSON, 0.1 + 0.2 = 0.30000000000000004). The frontend divides by 100 only when displaying, using `Intl.NumberFormat('en-ZA', { style: 'currency', currency: 'ZAR' })`.
 
 ### Shared phone check
-NOT VERIFIED in a browser yet. What is implemented: signing out (button or failed refresh) clears the TanStack Query cache with `queryClient.clear()` and clears the selected stokvel id. The selected id is kept in memory only, never in browser storage. The only `localStorage` use in `src/` is the theme.
+Not verified in a browser. What is implemented: signing out (button or failed refresh) clears the TanStack Query cache with `queryClient.clear()` and clears the selected stokvel id. The selected id is kept in memory only, never in browser storage. The only `localStorage` use in `src/` is the theme.
 No URL state yet (routing arrives in Week 8).
 
 ### Known gaps
-- Browser checks 1, 2 and 5 from "Before you start" and the shared phone steps were not run before submission, and there is no screenshot or screen recording yet.
+- Checks 2 and 5 were done with curl. In the browser, sign-in worked but the dashboard then showed a 500 error from the API (reference 432af5ee11cf47cc6cfeb56dc1b81ec6), so the 429 message, the shared phone check, the Devtools screenshot and the screen recording were not completed.
 - My API has no `GET /me` endpoint, so `useMe` was not written.
 - `ProblemDetails` in the OpenAPI schema has no `correlationId`, although the error view reads it from the real response. The fix belongs in the API's OpenAPI annotations, followed by `npm run api:types`.
 - No routing yet, so the back button check does not apply.
