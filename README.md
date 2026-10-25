@@ -1174,3 +1174,106 @@ No URL state yet (routing arrives in Week 8).
 - `ProblemDetails` in the OpenAPI schema has no `correlationId`, although the error view reads it from the real response. The fix belongs in the API's OpenAPI annotations, followed by `npm run api:types`.
 - No routing yet, so the back button check does not apply.
 - Stretch challenges not attempted.
+
+
+
+# Assignment 7.4: Record a contribution
+
+## Idempotency contract
+
+Checked against the running API (the script output is in the PR description).
+Endpoint: `POST /api/v1/stokvels/{stokvelId}/cycles/{cycleId}/contributions`, body `{ userId, amountInCents }`.
+
+| # | Question | Answer |
+|---|----------|--------|
+| 1 | Same key twice | The second call returns the same 201 and the same body, plus the header `Idempotency-Replayed: true`. CORS exposes that header (`WithExposedHeaders`), so the browser can read it. |
+| 2 | Same key, different amount | 409 Conflict: "This Idempotency-Key was already used with a different request body." The old response is NOT silently replayed, because the stored hash covers stokvel, member, cycle and amount. |
+| 3 | New key, member already contributed this cycle | 409 Conflict: "This member has already contributed for this cycle." (A database unique constraint backs it up.) |
+| 4 | Rate limited, then retry with the same key after Retry-After | Recorded once. I used up my rate limit, sent the real payment and got 429 with `Retry-After: 60`. After waiting, the same key returned 201 and the contribution was recorded once (a third call with that key replayed the same 201). The limiter runs before the service and the key is only stored after the row is saved, so a 429 never uses up a key. |
+| 5 | No key | 400 "The Idempotency-Key header is required." The header is a `[FromHeader]` parameter, so it is in the OpenAPI document and the generated client types it. |
+| 6 | Preflight from localhost:3000 | 204. Allowed: the CORS policy allows POST, the `Idempotency-Key` header and credentials (`Access-Control-Allow-Credentials: true`) for `http://localhost:3000`. |
+
+API fixes made for 7.4 (in the API, not worked around in the frontend):
+- New endpoint with the cycle in the URL and the amount as integer cents (`CycleContributionsController`), plus `RecordContributionRequestValidator`. The old `/contributions` endpoint is unchanged.
+- `ContributionService` now refuses a cycle that is not Open with a 409 and a plain detail. Before, a Closed or PaidOut cycle accepted money.
+- Role rule (403): as Thandi (a plain Member in Festive Grocery Club) I POSTed another member's `userId` and got `403 Forbidden`, "You do not have the required role in this stokvel." The form hides the member picker from Members, but that is only convenience; the API rule is what protects the money.
+
+## Idempotency proof
+
+An Idempotency-Key identifies an intent to pay, not a request. It is made with `crypto.randomUUID()` inside a per-form
+keeper (`createIntentKeeper`, held in component state with `useState`), not in a module variable and not in the TanStack cache.
+It is sent through the generated client as the `Idempotency-Key` header from the OpenAPI document.
+
+| What happened | Key |
+|---|---|
+| Form opens / last payment succeeded | New (made on the next submit) |
+| Network error, timeout, offline | Same |
+| 5xx | Same |
+| 429 | Same, after Retry-After |
+| 401, refreshed by authFetch and retried | Same (authFetch retries a clone of the same request) |
+| 201 (including a replay) | Released: the next payment gets a new key |
+| Amount, member or cycle changed | New (the intent fingerprint changed) |
+| 400 / 403 / 404 / 409 / 422 | New on the next attempt. These are real answers, so we know nothing was recorded. Reusing the key could only repeat a stale rejection, and the API already catches a real duplicate with a 409 (Q3). |
+
+**StrictMode:** no key is made during render. It is made inside the submit handler, and event handlers are not double-invoked.
+The `useState` initialiser that creates the keeper does run twice in StrictMode, but it makes no key. The test
+`StrictMode safety` proves it (the key factory is not called until `keyFor` is called, and then only once per intent).
+
+**Deliberate bug:** in `submitContribution.ts` I changed `keeper.keyFor(fingerprint)` to `crypto.randomUUID()`,
+so every attempt gets a new key. Test 5 (401) still passes with this bug, because authFetch retries a clone of the same
+request, so the key cannot change there. Tests 1 and 3 fail, as they should.
+
+Failing output:
+
+```
+ FAIL  src/contributions/recordContribution.test.ts > recording a contribution > 1. a retry after a network error sends the same key
+AssertionError: expected '10df9a11-4278-4c2c-b00d-f640d8a96455' to be 'efe6ee83-7bac-486a-89a7-b0328787fcad'
+ > src/contributions/recordContribution.test.ts:69:25
+     69|     expect(keysSeen[0]).toBe(keysSeen[1]);
+
+ FAIL  src/contributions/recordContribution.test.ts > recording a contribution > 3. a 429 keeps the key and exposes the wait
+AssertionError: expected '22fe3c19-1420-4845-9118-d31bea353ab1' to be 'b6739a9b-3d08-4e76-ac63-b6365792bd77'
+ > src/contributions/recordContribution.test.ts:100:25
+    100|     expect(keysSeen[0]).toBe(keysSeen[1]);
+
+ Test Files  1 failed (1)
+      Tests  2 failed | 5 passed (7)
+```
+
+Passing output after putting it back:
+
+```
+ ✓ src/contributions/recordContribution.test.ts (7 tests)
+
+ Test Files  1 passed (1)
+      Tests  7 passed (7)
+```
+
+What that bug would cost a real member: if their connection dropped after the server had saved the payment, the retry would
+carry a new key, so the API could not recognise it as the same payment. In this API the one-contribution-per-member-per-cycle
+rule would turn the retry into a confusing 409 for a payment that actually went through, and on an API without that rule
+the money would be recorded twice.
+
+**Reload while a request is in flight:** the key lives in component state, so it is lost. The next attempt gets a new key.
+That is still safe: if the first request did land, the new key meets the rule "one contribution per member per cycle" and
+the API answers 409 "This member has already contributed for this cycle", which tells the member it was recorded.
+Nothing is paid twice. (Persisting the key is a stretch challenge I did not do.)
+
+## Optimistic or not
+
+I did not make recording a contribution optimistic. Only the server knows the contribution's id, its status, the cycle's new
+total and any arrears, so an optimistic row would show invented values. If the API then rejected it with a 409 (for example
+the member had already paid, or the cycle just closed), the member would have seen a "Recorded" total that is wrong, and could
+have acted on it, for instance by stopping their saving for the cycle, before it was corrected. And to a treasurer reading
+"Recorded" at a meeting, it has to mean the server really has the money, so a payment that might vanish a second later is
+worse than a short wait. So the button stays disabled, we wait for the 201, then refetch the real numbers.
+
+## Known gaps
+
+- The key is not persisted across a reload (stretch challenge).
+- The idempotency store in `Program.cs` is still the in-memory one (`TEMP 7.1`), so keys are lost when the API restarts and are
+  not shared between replicas. The one-contribution-per-member-per-cycle rule still protects the money.
+- I did not add API integration tests for the new endpoint and the open-cycle check; I checked them by hand with curl and the
+  script output is in the PR description.
+- The prefilled amount is the signed-in member's balance. When a Treasurer switches member, the amount is not re-prefilled.
+- `currentUserId()` reads the `sub` claim from the access token, because my API has no `/me` endpoint.

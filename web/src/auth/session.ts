@@ -127,3 +127,19 @@ export function __resetSessionForTests() {
   refreshPromise = null;
   signedOutListeners.clear();
 }
+
+// NEW 7.4: the signed-in user's id, read from the "sub" claim of the access token.
+// It lives here because this is the ONLY file allowed to touch the token. Returns null when signed out.
+export function currentUserId(): string | null {
+  if (!accessToken) return null;
+  try {
+    const payload = accessToken.split('.')[1];
+    const parsed: unknown = JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/')));
+    if (parsed && typeof parsed === 'object' && 'sub' in parsed && typeof parsed.sub === 'string') {
+      return parsed.sub;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}

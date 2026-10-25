@@ -1,0 +1,2336 @@
+﻿
+=== web/package.json
+{
+  "name": "web",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --port 3000 --host localhost",
+    "build": "tsc -b && vite build",
+    "lint": "eslint .",
+    "preview": "vite preview",
+    "typecheck": "tsc -b",
+    "test": "vitest run",
+    "generate:api": "openapi-typescript http://localhost:5134/openapi/v1.json -o src/api/schema.d.ts",
+    "api:types": "openapi-typescript http://localhost:5134/openapi/v1.json -o src/api/schema.d.ts"
+  },
+  "dependencies": {
+    "@base-ui/react": "1.9.0",
+    "@fontsource-variable/geist": "5.3.0",
+    "@tailwindcss/vite": "4.3.3",
+    "@tanstack/react-query": "5.104.5",
+    "@tanstack/react-query-devtools": "5.104.5",
+    "class-variance-authority": "0.7.1",
+    "cn": "0.5.0",
+    "lucide-react": "1.60.0",
+    "openapi-fetch": "0.17.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "tailwindcss": "4.3.3",
+    "tw-animate-css": "1.4.0"
+  },
+  "devDependencies": {
+    "@babel/core": "7.29.7",
+    "@eslint/js": "10.0.1",
+    "@rolldown/plugin-babel": "0.2.4",
+    "@testing-library/dom": "10.4.2",
+    "@testing-library/react": "16.3.3",
+    "@types/babel__core": "7.20.5",
+    "@types/node": "24.19.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.2",
+    "babel-plugin-react-compiler": "1.0.0",
+    "eslint": "10.13.0",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "eslint-plugin-react-refresh": "0.5.7",
+    "globals": "17.13.0",
+    "jsdom": "30.1.3",
+    "openapi-typescript": "7.10.1",
+    "shadcn": "4.22.1",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.71.2",
+    "vite": "8.3.4",
+    "vitest": "5.0.5"
+  }
+}
+
+=== web/vite.config.ts
+import react, { reactCompilerPreset } from '@vitejs/plugin-react'
+import babel from '@rolldown/plugin-babel'
+import tailwindcss from '@tailwindcss/vite'
+import { fileURLToPath, URL } from 'node:url'
+import { defineConfig } from 'vite'
+
+// https://vite.dev/config/
+export default defineConfig({
+  server: {
+    port: 3000,
+    strictPort: true,
+  },
+  resolve: {
+    alias: {
+      '@': fileURLToPath(new URL('./src', import.meta.url)),
+    },
+  },
+  plugins: [
+    react(),
+    babel({ presets: [reactCompilerPreset()] }),
+    tailwindcss(),
+  ],
+})
+
+=== web/vitest.config.ts
+import { defineConfig } from 'vitest/config';
+import react from '@vitejs/plugin-react';
+
+// Separate config for tests so the dev build config stays untouched
+export default defineConfig({
+  plugins: [react()],
+  test: { environment: 'jsdom' },
+});
+
+=== web/.env.development
+# Use localhost, NOT 127.0.0.1, so the refresh cookie is sent
+VITE_API_BASE_URL=http://localhost:5134
+
+=== web/eslint.config.js
+import js from '@eslint/js'
+import globals from 'globals'
+import reactHooks from 'eslint-plugin-react-hooks'
+import reactRefresh from 'eslint-plugin-react-refresh'
+import tseslint from 'typescript-eslint'
+import { defineConfig, globalIgnores } from 'eslint/config'
+
+export default defineConfig([
+  globalIgnores(['dist']),
+  {
+    files: ['**/*.{ts,tsx}'],
+    extends: [
+      js.configs.recommended,
+      tseslint.configs.recommended,
+      reactHooks.configs.flat.recommended,
+      reactRefresh.configs.vite,
+    ],
+    languageOptions: {
+      globals: globals.browser,
+    },
+  },
+  {
+    files: ['src/components/ui/**'],
+    rules: { 'react-refresh/only-export-components': 'off' },
+  },
+])
+
+=== web/src/App.tsx
+import { useEffect, useState } from 'react';
+import { logout, onSignedOut, refreshAccessToken } from './auth/session';
+import { Dashboard } from './components/Dashboard';
+import { LoginForm } from './components/LoginForm';
+import { queryClient } from './lib/queryClient';
+import { clearSelectedStokvel } from './state/selectedStokvel';
+
+type Status = 'checking' | 'signedIn' | 'signedOut';
+
+export default function App() {
+  const [status, setStatus] = useState<Status>('checking');
+
+  useEffect(() => {
+    // Sign-out (button OR failed refresh): show the form, clear the cache AND the selected stokvel
+    const stopListening = onSignedOut(() => {
+      setStatus('signedOut');
+      clearSelectedStokvel();
+      queryClient.clear();
+    });
+    // After a page reload, try the cookie once to see if the member is still signed in
+    void refreshAccessToken().then((token) => setStatus(token ? 'signedIn' : 'signedOut'));
+    return stopListening;
+  }, []);
+
+  if (status === 'checking') return <p>Loadingâ€¦</p>;
+  if (status === 'signedOut') return <LoginForm onSignedIn={() => setStatus('signedIn')} />;
+
+  return (
+    <main style={{ maxWidth: 640, margin: '0 auto', padding: 16 }}>
+      <header style={{ display: 'flex', justifyContent: 'space-between' }}>
+        <h1>RondiTrack</h1>
+        <button onClick={() => void logout()}>Sign out</button>
+      </header>
+      <Dashboard />
+    </main>
+  );
+}
+
+=== web/src/api/apiError.ts
+// The one error type the whole app uses for failed API calls.
+// problem = the problem+json body (read defensively, no hand-written API types).
+export class ApiError extends Error {
+  readonly status: number;
+  readonly problem: Record<string, unknown> | null;
+  readonly retryAfter: string | null; // raw Retry-After header text
+
+  constructor(
+    status: number,
+    problem: Record<string, unknown> | null,
+    retryAfter: string | null,
+  ) {
+    super(
+      typeof problem?.title === 'string' ? problem.title : `Request failed with ${status}`,
+    );
+    this.name = 'ApiError';
+    this.status = status;
+    this.problem = problem;
+    this.retryAfter = retryAfter;
+  }
+}
+
+// Turns a failed Response into an ApiError (body may be empty, so we guard it)
+export async function apiErrorFromResponse(res: Response): Promise<ApiError> {
+  let problem: Record<string, unknown> | null = null;
+  try {
+    const body: unknown = await res.json();
+    if (body && typeof body === 'object') problem = body as Record<string, unknown>;
+  } catch {
+    // no JSON body, that is fine
+  }
+  return new ApiError(res.status, problem, res.headers.get('Retry-After'));
+}
+
+=== web/src/api/client.ts
+import createClient from 'openapi-fetch';
+import type { paths } from './schema'; // generated by npm run api:types, never edited by hand
+import { authFetch } from '../auth/session';
+import { ApiError } from './apiError';
+import { API_BASE_URL } from './config';
+
+// The one client for the whole app; authFetch adds the token and handles refresh
+export const api = createClient<paths>({ baseUrl: API_BASE_URL, fetch: authFetch });
+
+// Returns the data or throws an ApiError (status + problem body + Retry-After)
+export async function unwrap<T>(result: {
+  data?: T;
+  error?: unknown;
+  response: Response;
+}): Promise<T> {
+  if (result.response.ok && result.data !== undefined) return result.data;
+  const problem =
+    result.error && typeof result.error === 'object'
+      ? (result.error as Record<string, unknown>)
+      : null;
+  throw new ApiError(result.response.status, problem, result.response.headers.get('Retry-After'));
+}
+
+=== web/src/api/config.ts
+// One place for the API address; falls back so tests work without a .env file
+export const API_BASE_URL: string =
+  import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:5134';
+
+=== web/src/api/queries.ts
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
+import { api, unwrap } from './client';
+import { queryKeys } from './queryKeys';
+
+// Components only use these hooks, never api.GET or fetch directly.
+// Removed useMe: my API has no /api/v1/me endpoint (noted in README Known gaps).
+
+export function useHome() {
+  return useQuery({
+    queryKey: queryKeys.home,
+    queryFn: async () => unwrap(await api.GET('/api/v1/me/home')),
+  });
+}
+
+export function useStokvels() {
+  return useQuery({
+    queryKey: queryKeys.stokvels,
+    queryFn: async () => unwrap(await api.GET('/api/v1/stokvels')),
+  });
+}
+
+export function useStokvel(id: string) {
+  return useQuery({
+    queryKey: queryKeys.stokvel(id),
+    // Changed: the path parameter is called stokvelId in my API
+    queryFn: async () =>
+      unwrap(await api.GET('/api/v1/stokvels/{stokvelId}', { params: { path: { stokvelId: id } } })),
+  });
+}
+
+export function useCycles(id: string) {
+  return useQuery({
+    queryKey: queryKeys.cycles(id),
+    queryFn: async () =>
+      unwrap(
+        await api.GET('/api/v1/stokvels/{stokvelId}/cycles', { params: { path: { stokvelId: id } } }),
+      ),
+  });
+}
+
+// Contributions are paged and belong to one cycle of one stokvel
+export function useContributions(stokvelId: string, cycleId: string | undefined) {
+  return useInfiniteQuery({
+    queryKey: queryKeys.contributions(stokvelId, cycleId ?? ''),
+    enabled: cycleId !== undefined, // wait until we know which cycle to load
+    // NO placeholderData: keepPreviousData here. It would show the OLD stokvel's rows
+    // under the NEW stokvel's key (the Part 4 trap).
+    initialPageParam: undefined as string | undefined,
+    queryFn: async ({ pageParam }) =>
+      unwrap(
+        await api.GET('/api/v1/stokvels/{stokvelId}/cycles/{cycleId}/contributions', {
+          params: {
+            path: { stokvelId, cycleId: cycleId ?? '' },
+            query: { PageToken: pageParam }, // capital P, exactly as in my schema
+          },
+        }),
+      ),
+    // "" and null both mean "no next page" (check 4), so || undefined handles both
+    getNextPageParam: (lastPage) => lastPage.nextPageToken || undefined,
+  });
+}
+
+=== web/src/api/queryKeys.ts
+// Every key in one place. Data for one stokvel ALWAYS starts with ['stokvels', id],
+// so invalidateQueries({ queryKey: queryKeys.stokvel(id) }) refreshes one stokvel only.
+export const queryKeys = {
+  home: ['me', 'home'] as const,
+  stokvels: ['stokvels'] as const,
+  stokvel: (id: string) => ['stokvels', id] as const,
+  cycles: (id: string) => ['stokvels', id, 'cycles'] as const,
+  // Changed: contributions belong to a cycle in my API, so the cycle id is in the key too
+  contributions: (id: string, cycleId: string) =>
+    ['stokvels', id, 'cycles', cycleId, 'contributions'] as const,
+};
+
+=== web/src/auth/session.test.ts
+// @vitest-environment node
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { authFetch, login, onSignedOut, __resetSessionForTests } from './session';
+
+const BASE = 'http://localhost:5134';
+
+type Call = { auth: string | null; body: string };
+let fake: {
+  refreshCount: number;
+  refreshOk: boolean;
+  validToken: string; // the only token the fake API accepts
+  nextToken: string; // what /auth/refresh hands out
+  calls: Call[]; // every non-auth request the fake saw
+};
+
+const json = (data: unknown) =>
+  new Response(JSON.stringify(data), { status: 200, headers: { 'Content-Type': 'application/json' } });
+
+beforeEach(() => {
+  __resetSessionForTests(); // fresh module state for every test
+  fake = { refreshCount: 0, refreshOk: true, validToken: 'new', nextToken: 'new', calls: [] };
+
+  // Fake API. openapi-fetch passes a Request object, so we handle Request AND string URLs.
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    const isReq = input instanceof Request;
+    const url = isReq ? input.url : String(input);
+    const headers = isReq ? input.headers : new Headers(init?.headers);
+
+    if (url.endsWith('/auth/login')) return json({ accessToken: 'old' });
+    if (url.endsWith('/auth/refresh')) {
+      fake.refreshCount++;
+      await new Promise((r) => setTimeout(r, 20)); // delay so the race can really happen
+      if (!fake.refreshOk) return new Response(null, { status: 401 });
+      return json({ accessToken: fake.nextToken });
+    }
+
+    const body = isReq ? await input.clone().text() : String(init?.body ?? '');
+    const auth = headers.get('Authorization');
+    fake.calls.push({ auth, body });
+    return auth === `Bearer ${fake.validToken}` ? json({ ok: true }) : new Response(null, { status: 401 });
+  });
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+const get = () => authFetch(new Request(`${BASE}/api/v1/stokvels`));
+
+describe('session', () => {
+  it('five parallel 401s cause exactly one refresh', async () => {
+    await login('a@b.c', 'pw'); // token "old" is not accepted by the fake
+    const responses = await Promise.all([get(), get(), get(), get(), get()]);
+    expect(fake.refreshCount).toBe(1);
+    expect(responses.map((r) => r.status)).toEqual([200, 200, 200, 200, 200]);
+  });
+
+  it('a later expiry starts a new refresh', async () => {
+    await login('a@b.c', 'pw');
+    await Promise.all([get(), get(), get(), get(), get()]);
+    expect(fake.refreshCount).toBe(1);
+
+    // token "expires": the fake now only accepts "newer"
+    fake.validToken = 'newer';
+    fake.nextToken = 'newer';
+    const responses = await Promise.all([get(), get()]);
+    expect(fake.refreshCount).toBe(2); // the first promise was cleared
+    expect(responses.map((r) => r.status)).toEqual([200, 200]);
+  });
+
+  it('a failed refresh signs out once', async () => {
+    fake.refreshOk = false;
+    const signedOut = vi.fn();
+    onSignedOut(signedOut);
+    await login('a@b.c', 'pw');
+    const responses = await Promise.all([get(), get()]);
+    expect(signedOut).toHaveBeenCalledTimes(1);
+    expect(fake.refreshCount).toBe(1);
+    expect(fake.calls).toHaveLength(2); // each request sent once, never retried
+    expect(responses.map((r) => r.status)).toEqual([401, 401]);
+  });
+
+  it('no token means no loop', async () => {
+    fake.refreshOk = false; // fresh visitor: no cookie
+    const res = await get();
+    expect(fake.refreshCount).toBe(1); // one refresh attempt
+    expect(fake.calls).toHaveLength(1); // one request
+    expect(res.status).toBe(401); // comes straight back
+  });
+
+  it('a POST body survives the retry', async () => {
+    await login('a@b.c', 'pw');
+    const payload = JSON.stringify({ amount: 500 });
+    const res = await authFetch(
+      new Request(`${BASE}/api/v1/contributions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: payload,
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(fake.calls).toHaveLength(2); // first try 401, retry 200
+    expect(fake.calls[0].body).toBe(payload);
+    expect(fake.calls[1].body).toBe(payload); // same body on the retry
+  });
+});
+
+=== web/src/auth/session.ts
+/*
+ * WHY THE REFRESH MUST BE SINGLE-FLIGHT FOR MY API:
+ * My API rotates the refresh cookie, so every refresh uses up the cookie it was sent with.
+ * If five requests expire together and each sends its own refresh with the SAME old cookie,
+ * the first wins and the other four are rejected ([FILL IN: the status you saw in check 5,
+ * e.g. 401 or 409]), which would sign the member out. One shared refresh avoids that.
+ *
+ * This is the ONLY file in the project that reads or writes the access token.
+ */
+import { apiErrorFromResponse } from '../api/apiError';
+import { API_BASE_URL } from '../api/config';
+
+// Token lives only in this variable (never in browser storage, JS-set cookies, or React state)
+let accessToken: string | null = null;
+// The refresh that is currently running (shared by everyone who asks at the same time)
+let refreshPromise: Promise<string | null> | null = null;
+const signedOutListeners = new Set<() => void>();
+
+// The rest of the app subscribes here to hear "member signed out"
+export function onSignedOut(listener: () => void): () => void {
+  signedOutListeners.add(listener);
+  return () => {
+    signedOutListeners.delete(listener);
+  };
+}
+
+function notifySignedOut() {
+  signedOutListeners.forEach((l) => l());
+}
+
+// Reads accessToken out of a JSON body without hand-writing a type
+function tokenFrom(body: unknown): string | null {
+  if (body && typeof body === 'object' && 'accessToken' in body && typeof body.accessToken === 'string') {
+    return body.accessToken;
+  }
+  return null;
+}
+
+export async function login(email: string, password: string): Promise<void> {
+  const res = await fetch(`${API_BASE_URL}/api/v1/auth/login`, {
+    method: 'POST',
+    credentials: 'include', // so the browser stores the refresh cookie
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  });
+  if (!res.ok) throw await apiErrorFromResponse(res);
+  const token = tokenFrom(await res.json());
+  if (!token) throw new Error('Login response had no access token');
+  accessToken = token;
+}
+
+export async function logout(): Promise<void> {
+  const tokenBefore = accessToken;
+  accessToken = null; // forget the token first, no matter what happens next
+  try {
+    await fetch(`${API_BASE_URL}/api/v1/auth/logout`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: tokenBefore ? { Authorization: `Bearer ${tokenBefore}` } : {},
+    });
+  } catch {
+    // network failed: we still sign out locally
+  } finally {
+    notifySignedOut(); // always tell the app
+  }
+}
+
+// The real refresh call. Success stores the token; failure clears it and signs out.
+async function doRefresh(): Promise<string | null> {
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/v1/auth/refresh`, {
+      method: 'POST',
+      credentials: 'include',
+    });
+    const token = res.ok ? tokenFrom(await res.json()) : null;
+    if (!token) throw new Error('refresh failed');
+    accessToken = token;
+    return token;
+  } catch {
+    accessToken = null;
+    notifySignedOut();
+    return null;
+  }
+}
+
+export function refreshAccessToken(): Promise<string | null> {
+  // SINGLE-FLIGHT: if a refresh is already running, everyone gets that same promise.
+  // .finally clears it (success OR failure) so the next expiry can start a new refresh.
+  refreshPromise ??= doRefresh().finally(() => {
+    refreshPromise = null;
+  });
+  return refreshPromise;
+}
+
+// Sends a copy of the request with the token and cookie settings added
+function send(req: Request, token: string | null): Promise<Response> {
+  const headers = new Headers(req.headers);
+  if (token) headers.set('Authorization', `Bearer ${token}`);
+  return fetch(new Request(req, { headers, credentials: 'include' }));
+}
+
+// The fetch we hand to openapi-fetch
+export async function authFetch(request: Request): Promise<Response> {
+  // A body can only be read once, so keep a clone for a possible retry
+  const retryCopy = request.clone();
+
+  // After a page reload memory is empty: get a token using the cookie first
+  if (!accessToken) await refreshAccessToken();
+
+  const tokenUsed = accessToken;
+  const response = await send(request, tokenUsed);
+
+  // Not a 401, or we had NO token to begin with: return now (this stops the endless loop)
+  if (response.status !== 401 || !tokenUsed) return response;
+
+  // If another request already got a newer token, use it instead of refreshing again
+  const freshToken =
+    accessToken && accessToken !== tokenUsed ? accessToken : await refreshAccessToken();
+
+  if (!freshToken) return response; // refresh failed, doRefresh already signed us out
+  return send(retryCopy, freshToken); // retry exactly once
+}
+
+// ONLY for tests: wipes module state between tests
+export function __resetSessionForTests() {
+  accessToken = null;
+  refreshPromise = null;
+  signedOutListeners.clear();
+}
+
+=== web/src/components/Dashboard.tsx
+import { useState } from 'react';
+import { useStokvels } from '../api/queries';
+import {
+  clearSelectedStokvel,
+  setSelectedStokvelId,
+  useSelectedStokvelId,
+} from '../state/selectedStokvel';
+import { ErrorView } from './ErrorView';
+import { Skeleton } from './Skeleton';
+import { StokvelScreen } from './StokvelScreen';
+
+export function Dashboard() {
+  const stokvels = useStokvels();
+  const selectedId = useSelectedStokvelId();
+  const [typedId, setTypedId] = useState('');
+
+  if (stokvels.isPending) return <Skeleton label="Loading your stokvels" />;
+  if (stokvels.isError) {
+    return <ErrorView error={stokvels.error} onRetry={() => void stokvels.refetch()} />;
+  }
+
+  // ADJUST: this assumes GET /stokvels returns an array of { id, name }
+  const list = stokvels.data;
+  if (list.length === 0) {
+    return <p>You are not in any stokvel yet. Ask a treasurer to add you.</p>;
+  }
+
+  // The selected id is the ONLY input to the contribution hooks
+  const activeId = selectedId ?? list[0].id;
+
+  return (
+    <div>
+      <label htmlFor="stokvel-select">Stokvel</label>{' '}
+      <select
+        id="stokvel-select"
+        value={list.some((s) => s.id === activeId) ? activeId : ''}
+        onChange={(e) => setSelectedStokvelId(e.target.value)}
+      >
+        <option value="" disabled>Chooseâ€¦</option>
+        {list.map((s) => (
+          <option key={s.id} value={s.id}>{s.name}</option>
+        ))}
+      </select>
+
+      {/* Testing helper: lets you open a stokvel id you don't belong to (to see the 404 view) */}
+      <div style={{ margin: '8px 0' }}>
+        <label htmlFor="open-by-id">Open a stokvel by id (testing)</label>{' '}
+        <input id="open-by-id" value={typedId} onChange={(e) => setTypedId(e.target.value)} />{' '}
+        <button onClick={() => typedId && setSelectedStokvelId(typedId.trim())}>Open</button>
+      </div>
+
+      <StokvelScreen stokvelId={activeId} onBack={clearSelectedStokvel} />
+    </div>
+  );
+}
+
+=== web/src/components/DueCountdown.tsx
+// NEW: "Due today / Due tomorrow / Due in N days / Overdue by N days".
+// It re-renders ONCE just after each Johannesburg midnight, not every second (it only shows days).
+import { useEffect, useState } from 'react'
+import { dueCountdown, msUntilNextSaMidnight } from '@/lib/countdown'
+
+export function DueCountdown({ due, cycleStatus }: { due: string; cycleStatus: string }) {
+  const [now, setNow] = useState(() => new Date())
+
+  useEffect(() => {
+    if (cycleStatus !== 'Open') return // Closed / PaidOut cycles have no countdown, so no timer
+    // setTimeout (not setInterval): one timer for the next SA midnight. +50ms lands just after it.
+    const id = setTimeout(() => setNow(new Date()), msUntilNextSaMidnight(now) + 50)
+    return () => clearTimeout(id) // cleanup: StrictMode and unmounting must not leave a timer behind
+    // The effect READS `now`, so it must run again when `now` changes: that schedules the next midnight.
+  }, [now, cycleStatus])
+
+  const text = dueCountdown(due, now, cycleStatus)
+  if (text === null) return null
+  return <p className="text-sm font-medium">{text}</p>
+}
+
+=== web/src/components/ErrorView.tsx
+import { useEffect, useState } from 'react';
+import { describeError, rateLimitMessage } from '../lib/errorMessages';
+
+// Counts down from "start" seconds; its timer is cleared when the component unmounts
+function useCountdown(start: number | null): number | null {
+  const [endsAt] = useState(() => (start === null ? null : Date.now() + start * 1000));
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (endsAt === null) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [endsAt]);
+  return endsAt === null ? null : Math.max(0, Math.ceil((endsAt - now) / 1000));
+}
+
+// Reference the member can select and copy and read out to support
+export function Reference({ id }: { id: string | null }) {
+  if (!id) {
+    return <p style={{ fontSize: 12 }}>No reference available (the request never reached RondiTrack).</p>;
+  }
+  return (
+    <p style={{ fontSize: 12 }}>
+      Reference: <code style={{ fontFamily: 'monospace', userSelect: 'all' }}>{id}</code>
+    </p>
+  );
+}
+
+type Props = { error: unknown; onRetry?: () => void; onBack?: () => void };
+
+// The ONE error view every screen uses
+export function ErrorView({ error, onRetry, onBack }: Props) {
+  const d = describeError(error);
+  const seconds = useCountdown(d.retryAfterSeconds);
+
+  // Session ended: App shows the sign-in form, so we show nothing here (no stacked error)
+  if (d.kind === 'sessionEnded') return null;
+
+  const message =
+    d.kind === 'rateLimited' && seconds !== null
+      ? seconds > 0
+        ? rateLimitMessage(seconds)
+        : 'You can try again now.'
+      : d.message;
+
+  return (
+    <div role="alert" style={{ border: '1px solid #c33', padding: 16, borderRadius: 8, margin: '16px 0' }}>
+      <h2 style={{ marginTop: 0 }}>{d.title}</h2>
+      <p>{message}</p>
+      {d.kind === 'notFound' && onBack && <button onClick={onBack}>Back to my stokvels</button>}
+      {d.kind !== 'notFound' && onRetry && (
+        // for a 429 the button stays disabled until the countdown reaches zero
+        <button onClick={onRetry} disabled={seconds !== null && seconds > 0}>
+          Try again
+        </button>
+      )}
+      <Reference id={d.correlationId} />
+    </div>
+  );
+}
+
+=== web/src/components/LoginForm.tsx
+import { useState } from 'react';
+import { login } from '../auth/session';
+import { describeError } from '../lib/errorMessages';
+import { Reference } from './ErrorView';
+
+export function LoginForm({ onSignedIn }: { onSignedIn: () => void }) {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState<unknown>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      await login(email, password);
+      onSignedIn();
+    } catch (err) {
+      setError(err); // shown through describeError below
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const d = error ? describeError(error, 'login') : null;
+
+  return (
+    <form onSubmit={submit} style={{ display: 'grid', gap: 8, maxWidth: 320 }}>
+      <h1>Sign in to RondiTrack</h1>
+      <label htmlFor="email">Email</label>
+      <input id="email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} />
+      {d?.fieldErrors.email?.map((m) => <small key={m}>{m}</small>)}
+      <label htmlFor="password">Password</label>
+      <input id="password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+      {d?.fieldErrors.password?.map((m) => <small key={m}>{m}</small>)}
+      {d && d.kind !== 'validation' && (
+        <div role="alert">
+          <p>{d.message}</p>
+          <Reference id={d.correlationId} />
+        </div>
+      )}
+      <button type="submit" disabled={busy}>{busy ? 'Signing inâ€¦' : 'Sign in'}</button>
+    </form>
+  );
+}
+
+=== web/src/components/Skeleton.tsx
+// Simple loading placeholder
+export function Skeleton({ label }: { label: string }) {
+  return (
+    <div aria-busy="true" aria-label={label} style={{ display: 'grid', gap: 8, margin: '16px 0' }}>
+      <div style={{ height: 24, width: '40%', background: '#ddd', borderRadius: 4 }} />
+      <div style={{ height: 16, background: '#eee', borderRadius: 4 }} />
+      <div style={{ height: 16, background: '#eee', borderRadius: 4 }} />
+      <div style={{ height: 16, background: '#eee', borderRadius: 4 }} />
+    </div>
+  );
+}
+
+=== web/src/components/StatusBadge.tsx
+// NEW: one badge for every RondiTrack status. It takes a KIND as well as a status, because
+// "Paid" (a member's claim) and "PaidOut" (the whole pot went out) must never look alike.
+// Every badge shows a WORD + an ICON + a tone: never colour alone (WCAG 1.4.1).
+import {
+  Banknote, Check, CheckCheck, CircleDot, Clock, Info, Lock, TriangleAlert, type LucideIcon,
+} from 'lucide-react'
+import { Badge } from '@/components/ui/badge'
+import { cn } from '@/lib/utils'
+import { formatCents } from '@/lib/money'
+
+export type StatusKind = 'cycle' | 'contribution'
+
+// Light + dark colour pairs chosen for 4.5:1 text contrast. Measure them in DevTools (README table).
+const TONE = {
+  indigo: 'border-indigo-300 bg-indigo-100 text-indigo-900 dark:border-indigo-800 dark:bg-indigo-950 dark:text-indigo-200',
+  slate: 'border-slate-300 bg-slate-100 text-slate-900 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100',
+  violet: 'border-violet-300 bg-violet-100 text-violet-900 dark:border-violet-800 dark:bg-violet-950 dark:text-violet-200',
+  amber: 'border-amber-300 bg-amber-100 text-amber-900 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200',
+  sky: 'border-sky-300 bg-sky-100 text-sky-900 dark:border-sky-800 dark:bg-sky-950 dark:text-sky-200',
+  green: 'border-green-300 bg-green-100 text-green-900 dark:border-green-800 dark:bg-green-950 dark:text-green-200',
+  red: 'border-red-300 bg-red-100 text-red-900 dark:border-red-800 dark:bg-red-950 dark:text-red-200',
+  neutral: 'border-border bg-muted text-foreground', // theme tokens for the "unknown" look
+}
+
+type Look = { label: string; Icon: LucideIcon; tone: string }
+
+const CYCLE_LOOK = new Map<string, Look>([
+  ['Open', { label: 'Open', Icon: CircleDot, tone: TONE.indigo }],
+  ['Closed', { label: 'Closed', Icon: Lock, tone: TONE.slate }],
+  ['PaidOut', { label: 'Paid out', Icon: Banknote, tone: TONE.violet }], // human words, not "PaidOut"
+])
+
+const CONTRIBUTION_LOOK = new Map<string, Look>([
+  ['Pending', { label: 'Pending', Icon: Clock, tone: TONE.amber }],
+  ['Paid', { label: 'Paid, awaiting check', Icon: Check, tone: TONE.sky }], // the member's claim
+  ['Confirmed', { label: 'Confirmed', Icon: CheckCheck, tone: TONE.green }], // the treasurer's check
+])
+
+export function StatusBadge({ kind, status }: { kind: StatusKind; status: string }) {
+  const table = kind === 'cycle' ? CYCLE_LOOK : CONTRIBUTION_LOOK
+  // An unknown status shows its raw value in a neutral badge: no crash, no guess
+  const look = table.get(status) ?? { label: status, Icon: Info, tone: TONE.neutral }
+  const { label, Icon, tone } = look
+  return (
+    <Badge variant="outline" className={cn('h-auto gap-1 whitespace-normal text-left', tone)}>
+      <Icon aria-hidden="true" className="size-3.5 shrink-0" />
+      {label}
+    </Badge>
+  )
+}
+
+// Arrears badge: shows only when the caller really owes arrears. No arrears means no badge at all.
+export function ArrearsBadge({ cents }: { cents: number | null | undefined }) {
+  if (cents === null || cents === undefined || cents <= 0) return null
+  return (
+    <Badge variant="outline" className={cn('h-auto gap-1 whitespace-normal text-left', TONE.red)}>
+      <TriangleAlert aria-hidden="true" className="size-3.5 shrink-0" />
+      <span>
+        In arrears: <span className="whitespace-nowrap">{formatCents(cents)}</span>
+      </span>
+    </Badge>
+  )
+}
+
+=== web/src/components/StokvelScreen.tsx
+import { useContributions, useCycles, useStokvel } from '../api/queries';
+import { formatCentsAsRand } from '../lib/rand';
+import { ErrorView } from './ErrorView';
+import { Skeleton } from './Skeleton';
+
+// NOTE: do not give this component key={stokvelId}. Remounting would hide the keepPreviousData
+// bug instead of fixing it, and the Part 4 proof test would no longer prove anything.
+export function StokvelScreen({ stokvelId, onBack }: { stokvelId: string; onBack: () => void }) {
+  const stokvel = useStokvel(stokvelId);
+  const cycles = useCycles(stokvelId);
+
+  // Show the open cycle, otherwise the newest one
+  const sorted = cycles.data ? [...cycles.data].sort((a, b) => b.number - a.number) : [];
+  const cycle = sorted.find((c) => c.status === 'Open') ?? sorted[0];
+
+  const contributions = useContributions(stokvelId, cycle?.id);
+
+  // 1) error state is checked FIRST so a 404 never leaves a spinner forever
+  if (stokvel.isError || cycles.isError || contributions.isError) {
+    const error = stokvel.error ?? cycles.error ?? contributions.error;
+    return (
+      <ErrorView
+        error={error}
+        onBack={onBack}
+        onRetry={() => {
+          void stokvel.refetch();
+          void cycles.refetch();
+          void contributions.refetch();
+        }}
+      />
+    );
+  }
+
+  // 2) loading state: skeleton, never the old stokvel's rows
+  if (stokvel.isPending || cycles.isPending) return <Skeleton label="Loading stokvel" />;
+
+  // 3) empty state: no cycle yet
+  if (!cycle) {
+    return (
+      <section>
+        <h2>{stokvel.data.name}</h2>
+        <p>
+          No contribution cycle has been started yet. This is normal for a new stokvel. The
+          treasurer can start the first cycle.
+        </p>
+      </section>
+    );
+  }
+
+  if (contributions.isPending) return <Skeleton label="Loading contributions" />;
+
+  const rows = contributions.data.pages.flatMap((page) => page.items);
+  const totalCents = rows.reduce((sum, c) => sum + c.amountCents, 0);
+
+  return (
+    <section>
+      <h2>{stokvel.data.name}</h2>
+      <p>Cycle {cycle.number}</p>
+
+      {/* 3) empty state: cycle exists but nobody has paid yet */}
+      {rows.length === 0 ? (
+        <p>
+          No contributions yet. This is normal for a new cycle. The treasurer can record the
+          first contribution once a member pays in.
+        </p>
+      ) : (
+        // 4) data state
+        <>
+          <p>Total shown: <strong>{formatCentsAsRand(totalCents)}</strong></p>
+          <ul>
+            {rows.map((c) => (
+              <li key={c.id}>
+                {c.memberName}: {formatCentsAsRand(c.amountCents)} ({c.status})
+              </li>
+            ))}
+          </ul>
+          {contributions.hasNextPage && (
+            <button
+              onClick={() => void contributions.fetchNextPage()}
+              disabled={contributions.isFetchingNextPage}
+            >
+              {contributions.isFetchingNextPage ? 'Loadingâ€¦' : 'Load more'}
+            </button>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
+=== web/src/components/StokvelSwitch.test.tsx
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { QueryClientProvider } from '@tanstack/react-query';
+import { createQueryClient } from '../lib/queryClient';
+import { Dashboard } from './Dashboard';
+import { formatCentsAsRand } from '../lib/rand';
+import { __resetSessionForTests } from '../auth/session';
+import { clearSelectedStokvel } from '../state/selectedStokvel';
+
+const json = (data: unknown) =>
+  new Response(JSON.stringify(data), { status: 200, headers: { 'Content-Type': 'application/json' } });
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+beforeEach(() => {
+  __resetSessionForTests();
+  clearSelectedStokvel();
+  // Fake API matching my real routes. Stokvel "b" answers SLOWLY (150 ms) on every call.
+  // If it answered instantly the bug could not appear and the test would prove nothing.
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
+    const path = new URL(input instanceof Request ? input.url : String(input)).pathname;
+    if (path.endsWith('/auth/refresh')) return json({ accessToken: 'tok' });
+    if (path.endsWith('/api/v1/stokvels')) {
+      return json([{ id: 'a', name: 'Mabena Family' }, { id: 'b', name: 'Soweto Teachers' }]);
+    }
+    const match = path.match(/\/api\/v1\/stokvels\/([^/]+)(?:\/cycles(?:\/([^/]+)\/contributions)?)?$/);
+    if (!match) return new Response(null, { status: 404 });
+    const [, id, cycleId] = match;
+    if (id === 'b') await sleep(150);
+
+    if (cycleId) {
+      return json({
+        items: [id === 'a'
+          ? { id: 'a1', memberName: 'Thandi Mabena', amountCents: 11111, status: 'Paid' }
+          : { id: 'b1', memberName: 'Sipho Dlamini', amountCents: 22222, status: 'Paid' }],
+        nextPageToken: '',
+      });
+    }
+    if (path.endsWith('/cycles')) {
+      return json([{ id: `${id}-c1`, number: 1, status: 'Open' }]);
+    }
+    return json({ id, name: id === 'a' ? 'Mabena Family' : 'Soweto Teachers' });
+  });
+});
+
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
+
+describe('stokvel switching', () => {
+  it('never shows the previous stokvel amounts right after switching', async () => {
+    render(
+      <QueryClientProvider client={createQueryClient()}>
+        <Dashboard />
+      </QueryClientProvider>,
+    );
+
+    // stokvel A is on screen
+    await screen.findByText(/Thandi Mabena/);
+    expect(document.body.textContent).toContain(formatCentsAsRand(11111));
+
+    // switch to B, then look IMMEDIATELY (B is still loading)
+    fireEvent.change(screen.getByLabelText('Stokvel'), { target: { value: 'b' } });
+    expect(document.body.textContent).not.toContain(formatCentsAsRand(11111));
+    expect(document.body.textContent).not.toContain('Thandi Mabena');
+
+    // later, B's own data arrives
+    // Wait until B's heading shows; at that moment A's rows must NOT be under it
+    await screen.findByRole('heading', { name: 'Soweto Teachers' });
+    expect(document.body.textContent).not.toContain(formatCentsAsRand(11111));
+    await screen.findByText(/Sipho Dlamini/);
+    expect(document.body.textContent).toContain(formatCentsAsRand(22222));
+  });
+});
+
+=== web/src/components/ThemeToggle.tsx
+// NEW: Light / Dark / System buttons. aria-pressed tells a screen reader which one is on.
+import { Monitor, Moon, Sun } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { useTheme, type Theme } from '@/theme/theme-context'
+
+const OPTIONS: { value: Theme; label: string; Icon: typeof Sun }[] = [
+  { value: 'light', label: 'Light', Icon: Sun },
+  { value: 'dark', label: 'Dark', Icon: Moon },
+  { value: 'system', label: 'System', Icon: Monitor },
+]
+
+export function ThemeToggle() {
+  const { theme, setTheme } = useTheme()
+  return (
+    <div role="group" aria-label="Colour theme" className="flex flex-wrap gap-1">
+      {OPTIONS.map(({ value, label, Icon }) => (
+        <Button
+          key={value}
+          type="button"
+          size="sm"
+          variant={theme === value ? 'default' : 'outline'}
+          aria-pressed={theme === value}
+          onClick={() => setTheme(value)}
+        >
+          <Icon aria-hidden="true" />
+          {label}
+        </Button>
+      ))}
+    </div>
+  )
+}
+
+=== web/src/config.ts
+// One place for the API address; falls back so tests work without a .env file
+export const API_BASE_URL: string =
+  import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:5134';
+
+=== web/src/lib/countdown.test.ts
+// NEW: boundary tests for the due-date maths. Every test passes its own "now".
+import { describe, expect, it } from 'vitest'
+import { dueCountdown, dueDateToDeadline, msUntilNextSaMidnight } from './countdown'
+
+const at = (iso: string) => new Date(iso)
+
+describe('dueDateToDeadline', () => {
+  it('turns a calendar date into the END of that day in Johannesburg', () => {
+    expect(dueDateToDeadline('2026-10-31').toISOString()).toBe('2026-10-31T22:00:00.000Z')
+  })
+
+  it('does not treat the date as UTC midnight', () => {
+    expect(dueDateToDeadline('2026-10-31').toISOString()).not.toBe('2026-10-31T00:00:00.000Z')
+  })
+
+  it('uses the South African day of an instant', () => {
+    expect(dueDateToDeadline('2026-10-31T21:59:59Z').toISOString()).toBe('2026-10-31T22:00:00.000Z')
+  })
+
+  it('throws on a value that is not a date', () => {
+    expect(() => dueDateToDeadline('banana')).toThrow()
+  })
+})
+
+describe('dueCountdown', () => {
+  it('23:30 SAST on the due date is Due today, not overdue', () => {
+    expect(dueCountdown('2026-10-31', at('2026-10-31T21:30:00Z'), 'Open')).toBe('Due today')
+  })
+
+  it('00:30 SAST on the due date is Due today', () => {
+    expect(dueCountdown('2026-10-31', at('2026-10-30T22:30:00Z'), 'Open')).toBe('Due today')
+  })
+
+  it('one second after the deadline is Overdue by 1 day', () => {
+    expect(dueCountdown('2026-10-31', at('2026-10-31T22:00:01Z'), 'Open')).toBe('Overdue by 1 day')
+  })
+
+  it('counts several days overdue', () => {
+    expect(dueCountdown('2026-10-31', at('2026-11-03T10:00:00Z'), 'Open')).toBe('Overdue by 3 days')
+  })
+
+  it('the day before is Due tomorrow', () => {
+    expect(dueCountdown('2026-10-31', at('2026-10-30T10:00:00Z'), 'Open')).toBe('Due tomorrow')
+  })
+
+  it('later shows Due in N days', () => {
+    expect(dueCountdown('2026-10-31', at('2026-10-26T10:00:00Z'), 'Open')).toBe('Due in 5 days')
+  })
+
+  it('shows no countdown for Closed or PaidOut cycles', () => {
+    expect(dueCountdown('2026-10-31', at('2026-10-31T10:00:00Z'), 'Closed')).toBeNull()
+    expect(dueCountdown('2026-10-31', at('2026-10-31T10:00:00Z'), 'PaidOut')).toBeNull()
+  })
+})
+
+describe('msUntilNextSaMidnight', () => {
+  it('from 23:30 SAST it is 30 minutes', () => {
+    expect(msUntilNextSaMidnight(at('2026-10-31T21:30:00Z'))).toBe(30 * 60 * 1000)
+  })
+
+  it('from exactly midnight it is 24 hours, not 0', () => {
+    expect(msUntilNextSaMidnight(at('2026-10-31T22:00:00Z'))).toBe(24 * 60 * 60 * 1000)
+  })
+})
+
+=== web/src/lib/countdown.ts
+// NEW: South African due-date maths. Pure functions: "now" is always passed in, never read here.
+const MS_PER_DAY = 86_400_000
+// South Africa is UTC+2 all year with no daylight saving since 1944, so a fixed offset is safe.
+const SA_OFFSET_MS = 2 * 3_600_000
+const CALENDAR_DATE = /^\d{4}-\d{2}-\d{2}$/
+
+// Which South African calendar day an instant falls on (a whole number of days since 1970).
+export function saDayIndex(instant: Date): number {
+  return Math.floor((instant.getTime() + SA_OFFSET_MS) / MS_PER_DAY)
+}
+
+// The South African calendar day a due date means. "2026-10-31" is that day itself;
+// an instant like "2026-10-31T21:59:59Z" is the SA day it falls on.
+function dueDayIndex(due: string): number {
+  if (CALENDAR_DATE.test(due)) {
+    const year = Number(due.slice(0, 4))
+    const month = Number(due.slice(5, 7))
+    const day = Number(due.slice(8, 10))
+    return Date.UTC(year, month - 1, day) / MS_PER_DAY
+  }
+  const instant = new Date(due)
+  if (Number.isNaN(instant.getTime())) throw new Error(`not a valid due date: ${due}`)
+  return saDayIndex(instant)
+}
+
+// The moment the due day ENDS in Johannesburg. "2026-10-31" -> 2026-10-31T22:00:00Z (not 00:00Z).
+export function dueDateToDeadline(due: string): Date {
+  return new Date((dueDayIndex(due) + 1) * MS_PER_DAY - SA_OFFSET_MS)
+}
+
+// Milliseconds until the next Johannesburg midnight. Exactly at midnight it returns 24 hours, never 0.
+export function msUntilNextSaMidnight(now: Date): number {
+  return (saDayIndex(now) + 1) * MS_PER_DAY - SA_OFFSET_MS - now.getTime()
+}
+
+function days(n: number): string {
+  return n === 1 ? 'day' : 'days'
+}
+
+// The countdown words, or null when no countdown should show (cycle Closed or PaidOut).
+export function dueCountdown(due: string, now: Date, cycleStatus: string): string | null {
+  if (cycleStatus !== 'Open') return null
+
+  if (now.getTime() >= dueDateToDeadline(due).getTime()) {
+    const late = saDayIndex(now) - dueDayIndex(due)
+    return `Overdue by ${late} ${days(late)}`
+  }
+
+  const left = dueDayIndex(due) - saDayIndex(now)
+  if (left === 0) return 'Due today'
+  if (left === 1) return 'Due tomorrow'
+  return `Due in ${left} days`
+}
+
+=== web/src/lib/dates.test.ts
+// NEW: tests proving the midnight case and the calendar-date case.
+import { describe, expect, it } from 'vitest'
+import { formatDate, formatDateTime } from './dates'
+
+describe('dates', () => {
+  // The midnight case: 22:30 UTC on 31 Oct is already 00:30 on 1 Nov in Johannesburg
+  it('shows the midnight payment on 01 Nov 2026, 00:30', () => {
+    expect(formatDateTime('2026-10-31T22:30:00Z')).toBe('01 Nov 2026, 00:30')
+  })
+
+  it('shows the date part of that instant as 01 Nov 2026', () => {
+    expect(formatDate('2026-10-31T22:30:00Z')).toBe('01 Nov 2026')
+  })
+
+  it('keeps a South African calendar date on the same day', () => {
+    expect(formatDate('2026-10-31')).toBe('31 Oct 2026')
+  })
+
+  it('throws on a value that is not a date', () => {
+    expect(() => formatDate('banana')).toThrow()
+  })
+})
+
+=== web/src/lib/dates.ts
+// NEW: formats dates in South African time, whatever time zone the laptop is set to.
+const TIME_ZONE = 'Africa/Johannesburg'
+
+// "01 Nov 2026, 00:30"
+const dateTimeFormatter = new Intl.DateTimeFormat('en-ZA', {
+  dateStyle: 'medium',
+  timeStyle: 'short',
+  timeZone: TIME_ZONE,
+})
+
+// "01 Nov 2026"
+const dateFormatter = new Intl.DateTimeFormat('en-ZA', {
+  dateStyle: 'medium',
+  timeZone: TIME_ZONE,
+})
+
+// Matches a plain calendar date like "2026-10-31" (no time, no Z)
+const CALENDAR_DATE = /^\d{4}-\d{2}-\d{2}$/
+
+function toDate(value: string): Date {
+  // A plain calendar date is already a South African day. Noon UTC (14:00 in SA)
+  // means no time zone can push it onto the wrong day.
+  const date = CALENDAR_DATE.test(value) ? new Date(`${value}T12:00:00Z`) : new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    throw new Error(`not a valid date: ${value}`)
+  }
+  return date
+}
+
+// For UTC instants like "2026-10-31T22:30:00Z" (date AND time, in SA time)
+export function formatDateTime(value: string): string {
+  return dateTimeFormatter.format(toDate(value))
+}
+
+// Date only. Works with both a UTC instant and a calendar date
+export function formatDate(value: string): string {
+  return dateFormatter.format(toDate(value))
+}
+
+=== web/src/lib/errorMessages.test.ts
+import { describe, it, expect } from 'vitest';
+import { ApiError } from '../api/apiError';
+import { describeError, parseRetryAfter } from './errorMessages';
+
+const NOW = Date.parse('2026-10-21T10:00:00Z');
+
+describe('parseRetryAfter', () => {
+  it('reads seconds', () => expect(parseRetryAfter('23', NOW)).toBe(23));
+  it('reads an HTTP date', () =>
+    expect(parseRetryAfter('Wed, 21 Oct 2026 10:00:30 GMT', NOW)).toBe(30));
+  it('gives 0 for a date in the past', () =>
+    expect(parseRetryAfter('Wed, 21 Oct 2026 09:00:00 GMT', NOW)).toBe(0));
+  it('gives null for garbage', () => {
+    expect(parseRetryAfter('soon', NOW)).toBeNull();
+    expect(parseRetryAfter(null, NOW)).toBeNull();
+    expect(parseRetryAfter('', NOW)).toBeNull();
+  });
+});
+
+describe('describeError', () => {
+  it('404 says stokvel not found and keeps the reference', () => {
+    const d = describeError(new ApiError(404, { correlationId: 'abc' }, null));
+    expect(d.kind).toBe('notFound');
+    expect(d.title).toBe('Stokvel not found');
+    expect(d.correlationId).toBe('abc');
+  });
+  it('429 shows the number from the header', () => {
+    const d = describeError(new ApiError(429, null, '23'));
+    expect(d.message).toBe('Too many requests. Try again in 23 seconds.');
+  });
+  it('wrong password never says which part was wrong', () => {
+    const d = describeError(new ApiError(401, null, null), 'login');
+    expect(d.message).toBe('Email or password is incorrect.');
+  });
+  it('network failure has no reference', () => {
+    const d = describeError(new TypeError('Failed to fetch'));
+    expect(d.kind).toBe('network');
+    expect(d.correlationId).toBeNull();
+  });
+  it('500 never shows the detail', () => {
+    const d = describeError(new ApiError(500, { detail: 'SELECT * FROM secrets', correlationId: 'x1' }, null));
+    expect(d.message).not.toContain('SELECT');
+    expect(d.correlationId).toBe('x1');
+  });
+  it('400 returns field messages', () => {
+    const d = describeError(new ApiError(400, { errors: { Email: ['Required'] } }, null));
+    expect(d.fieldErrors.email).toEqual(['Required']);
+  });
+});
+
+=== web/src/lib/errorMessages.ts
+import { ApiError } from '../api/apiError';
+
+export type ErrorKind =
+  | 'network'
+  | 'rateLimited'
+  | 'badCredentials'
+  | 'sessionEnded'
+  | 'notFound'
+  | 'validation'
+  | 'generic';
+
+export type DescribedError = {
+  kind: ErrorKind;
+  title: string;
+  message: string;
+  correlationId: string | null; // null = there is no reference to show
+  retryAfterSeconds: number | null;
+  fieldErrors: Record<string, string[]>; // keys are lower-case, e.g. "email"
+};
+
+// Retry-After is either seconds ("23") or an HTTP date. Returns seconds or null.
+export function parseRetryAfter(header: string | null | undefined, now: number = Date.now()): number | null {
+  if (!header) return null;
+  const text = header.trim();
+  if (/^\d+$/.test(text)) return Number(text);
+  const when = Date.parse(text);
+  if (Number.isNaN(when)) return null;
+  return Math.max(0, Math.ceil((when - now) / 1000)); // date in the past = 0
+}
+
+export function rateLimitMessage(seconds: number | null): string {
+  if (seconds === null) return 'Too many requests. Please wait a moment and try again.';
+  return `Too many requests. Try again in ${seconds} ${seconds === 1 ? 'second' : 'seconds'}.`;
+}
+
+const asString = (v: unknown): string | null => (typeof v === 'string' && v ? v : null);
+
+// Turns ANY error into plain words. Never uses the "detail" field (it can leak internals on a 500).
+export function describeError(error: unknown, context: 'data' | 'login' = 'data'): DescribedError {
+  const empty = { correlationId: null, retryAfterSeconds: null, fieldErrors: {} };
+
+  // fetch itself failed (API down, no internet): there is no response and no reference
+  if (error instanceof TypeError) {
+    return {
+      ...empty,
+      kind: 'network',
+      title: "Can't reach RondiTrack",
+      message: 'Check your connection.',
+    };
+  }
+
+  if (!(error instanceof ApiError)) {
+    return {
+      ...empty,
+      kind: 'generic',
+      title: 'Something went wrong',
+      message: 'Something went wrong on our side. Please try again.',
+    };
+  }
+
+  const correlationId = asString(error.problem?.correlationId);
+  const base = { ...empty, correlationId };
+
+  if (error.status === 429) {
+    const seconds = parseRetryAfter(error.retryAfter);
+    return {
+      ...base,
+      kind: 'rateLimited',
+      title: 'Too many requests',
+      message: rateLimitMessage(seconds),
+      retryAfterSeconds: seconds,
+    };
+  }
+  if (error.status === 401) {
+    return context === 'login'
+      ? { ...base, kind: 'badCredentials', title: 'Sign in failed', message: 'Email or password is incorrect.' }
+      : { ...base, kind: 'sessionEnded', title: 'Session ended', message: 'Please sign in again.' };
+  }
+  if (error.status === 404) {
+    return {
+      ...base,
+      kind: 'notFound',
+      title: 'Stokvel not found',
+      message: "This stokvel doesn't exist, or you are not a member of it.",
+    };
+  }
+  if (error.status === 400) {
+    const fieldErrors: Record<string, string[]> = {};
+    const raw = error.problem?.errors;
+    if (raw && typeof raw === 'object') {
+      for (const [key, value] of Object.entries(raw)) {
+        if (Array.isArray(value)) fieldErrors[key.toLowerCase()] = value.map(String);
+      }
+    }
+    return { ...base, kind: 'validation', title: 'Please check your details', message: 'Some fields need your attention.', fieldErrors };
+  }
+  return {
+    ...base,
+    kind: 'generic',
+    title: 'Something went wrong',
+    message: 'Something went wrong on our side. Please try again in a moment.',
+  };
+}
+
+=== web/src/lib/groupContributionsByCycle.test.ts
+// NEW: tests for the grouping function.
+import { describe, expect, it } from 'vitest'
+import { UNKNOWN_CYCLE_KEY, groupContributionsByCycle } from './groupContributionsByCycle'
+
+const cycles = [
+  { id: 'c1', number: 1 },
+  { id: 'c3', number: 3 },
+  { id: 'c2', number: 2 },
+]
+
+const contributions = [
+  { id: 'a', cycleId: 'c3' },
+  { id: 'b', cycleId: 'c1' },
+  { id: 'c', cycleId: 'c3' },
+]
+
+describe('groupContributionsByCycle', () => {
+  it('puts the newest cycle first', () => {
+    const groups = groupContributionsByCycle(cycles, contributions)
+    expect(groups.map((g) => g.key)).toEqual(['c3', 'c2', 'c1'])
+  })
+
+  it('still shows a cycle that has no contributions', () => {
+    const groups = groupContributionsByCycle(cycles, contributions)
+    const empty = groups.find((g) => g.key === 'c2')
+    expect(empty?.contributions).toEqual([])
+  })
+
+  it('keeps contributions in the order given, under the right cycle', () => {
+    const groups = groupContributionsByCycle(cycles, contributions)
+    expect(groups[0].contributions.map((c) => c.id)).toEqual(['a', 'c'])
+    expect(groups[2].contributions.map((c) => c.id)).toEqual(['b'])
+  })
+
+  it('puts an unknown cycle id in a final Unknown cycle group and never drops it', () => {
+    const withOrphan = [...contributions, { id: 'z', cycleId: 'missing' }]
+    const groups = groupContributionsByCycle(cycles, withOrphan)
+    const last = groups[groups.length - 1]
+    expect(last.key).toBe(UNKNOWN_CYCLE_KEY)
+    expect(last.cycle).toBeNull()
+    expect(last.contributions.map((c) => c.id)).toEqual(['z'])
+  })
+
+  it('has no Unknown cycle group when nothing is orphaned', () => {
+    const groups = groupContributionsByCycle(cycles, contributions)
+    expect(groups.some((g) => g.key === UNKNOWN_CYCLE_KEY)).toBe(false)
+  })
+
+  it('the total number of contributions out equals the number in', () => {
+    const withOrphan = [...contributions, { id: 'z', cycleId: 'missing' }]
+    const groups = groupContributionsByCycle(cycles, withOrphan)
+    const total = groups.reduce((sum, g) => sum + g.contributions.length, 0)
+    expect(total).toBe(withOrphan.length)
+  })
+})
+
+=== web/src/lib/groupContributionsByCycle.ts
+// NEW: groups contributions under their cycle. A pure function: no state, no effects, called during render.
+// Generic on purpose: it only needs a cycle id + number and a contribution cycleId, so the real types come from the API.
+export const UNKNOWN_CYCLE_KEY = 'unknown-cycle'
+
+export type CycleGroup<C, T> = {
+  key: string // the cycle id (or "unknown-cycle"): open/closed state is keyed by this, never by position
+  cycle: C | null // null only for the "Unknown cycle" group
+  contributions: T[]
+}
+
+export function groupContributionsByCycle<
+  C extends { id: string; number: number },
+  T extends { cycleId: string },
+>(cycles: readonly C[], contributions: readonly T[]): CycleGroup<C, T>[] {
+  const knownIds = new Set(cycles.map((cycle) => cycle.id))
+  const byCycle = new Map<string, T[]>()
+  const orphans: T[] = []
+
+  // Keep each contribution in the order the API gave it (newest first)
+  for (const contribution of contributions) {
+    if (knownIds.has(contribution.cycleId)) {
+      const list = byCycle.get(contribution.cycleId) ?? []
+      list.push(contribution)
+      byCycle.set(contribution.cycleId, list)
+    } else {
+      orphans.push(contribution) // never dropped: it goes to "Unknown cycle"
+    }
+  }
+
+  // Newest cycle first (highest number). A cycle with no contributions still gets a group.
+  const groups: CycleGroup<C, T>[] = [...cycles]
+    .sort((a, b) => b.number - a.number)
+    .map((cycle) => ({ key: cycle.id, cycle, contributions: byCycle.get(cycle.id) ?? [] }))
+
+  if (orphans.length > 0) {
+    groups.push({ key: UNKNOWN_CYCLE_KEY, cycle: null, contributions: orphans })
+  }
+  return groups
+}
+
+=== web/src/lib/money.test.ts
+// NEW: tests for formatCents, including the no-break-space (NBSP) detail.
+import { describe, expect, it } from 'vitest'
+import { formatCents } from './money'
+
+// The expected strings use U+00A0, not a normal space, so we spell it out.
+const NBSP = '\u00A0'
+
+describe('formatCents', () => {
+  it('formats 10 cents', () => {
+    expect(formatCents(10)).toBe(`R${NBSP}0,10`)
+  })
+
+  it('formats zero', () => {
+    expect(formatCents(0)).toBe(`R${NBSP}0,00`)
+  })
+
+  it('formats 15050 cents', () => {
+    expect(formatCents(15050)).toBe(`R${NBSP}150,50`)
+  })
+
+  it('formats thousands with no-break-space separators', () => {
+    expect(formatCents(1234567)).toBe(`R${NBSP}12${NBSP}345,67`)
+  })
+
+  it('throws when the input is not a whole number of cents', () => {
+    expect(() => formatCents(10.5)).toThrow('not a whole number of cents')
+  })
+
+  // My own edge case: a large amount a stokvel could hold (R 999 999,99)
+  it('formats a large amount exactly', () => {
+    expect(formatCents(99999999)).toBe(`R${NBSP}999${NBSP}999,99`)
+  })
+})
+
+=== web/src/lib/money.ts
+// NEW: turns an integer number of cents into "R 150,50" without ever using fractional floats.
+const zarFormatter = new Intl.NumberFormat('en-ZA', {
+  style: 'currency',
+  currency: 'ZAR',
+})
+
+export function formatCents(cents: number): string {
+  // Reject 10.5, NaN, Infinity, or numbers too big to be exact
+  if (!Number.isSafeInteger(cents)) {
+    throw new Error('not a whole number of cents')
+  }
+
+  // BigInt keeps everything as whole numbers, so there is no float rounding at all
+  const big = BigInt(cents)
+  const negative = big < 0n
+  const abs = negative ? -big : big
+
+  // Integer division and remainder: 15050 cents -> 150 rands and 50 cents
+  const rands = abs / 100n
+  const rest = abs % 100n
+
+  // Build an exact decimal string like "150.50" (pad so 5 cents becomes "05")
+  const decimal = `${negative ? '-' : ''}${rands}.${rest.toString().padStart(2, '0')}`
+
+  // Intl accepts an exact decimal string, so it formats without turning it into a float
+  return zarFormatter.format(decimal as `${number}`)
+}
+
+// Step 7 name: later files import formatRand, so it forwards to formatCents
+export function formatRand(value: number): string {
+  return formatCents(value)
+}
+
+=== web/src/lib/queryClient.ts
+import { QueryClient } from '@tanstack/react-query';
+import { ApiError } from '../api/apiError';
+
+// Makes a fresh client (tests use this so each test starts clean)
+export function createQueryClient() {
+  return new QueryClient({
+    defaultOptions: {
+      queries: {
+        staleTime: 30_000,
+        refetchOnWindowFocus: false,
+        // 404, 403, 429 will not fix themselves, so never retry any 4xx
+        retry: (failureCount, error) => {
+          if (error instanceof ApiError && error.status >= 400 && error.status < 500) return false;
+          return failureCount < 3;
+        },
+      },
+    },
+  });
+}
+
+// The one client the real app uses
+export const queryClient = createQueryClient();
+
+=== web/src/lib/rand.ts
+// Shows whole cents (like 11111) as South African rand ("R 111,11")
+const zar = new Intl.NumberFormat('en-ZA', { style: 'currency', currency: 'ZAR' });
+
+export function formatCentsAsRand(cents: number): string {
+  return zar.format(cents / 100); // divide by 100 only when displaying
+}
+
+=== web/src/lib/roles.test.ts
+// NEW: tests that cover the role comparison so a typo gets caught.
+import { describe, expect, it } from 'vitest'
+import { isTreasurer, roleLabel } from './roles'
+
+describe('roles', () => {
+  it('knows a Treasurer', () => {
+    expect(isTreasurer('Treasurer')).toBe(true)
+  })
+
+  it('does not treat a Member as Treasurer', () => {
+    expect(isTreasurer('Member')).toBe(false)
+  })
+
+  it('does not treat a typo as Treasurer', () => {
+    expect(isTreasurer('Treasuer')).toBe(false)
+  })
+
+  it('shows the role as text', () => {
+    expect(roleLabel('Treasurer')).toBe("You're the Treasurer")
+    expect(roleLabel('Member')).toBe("You're a Member")
+    expect(roleLabel('Admin')).toBe("You're an Admin")
+  })
+})
+
+=== web/src/lib/roles.ts
+// NEW: the ONLY place the role strings are compared, so a typo can't silently hide the section.
+const TREASURER = 'Treasurer'
+const MEMBER = 'Member'
+const ADMIN = 'Admin'
+
+export function isTreasurer(role: string): boolean {
+  return role === TREASURER
+}
+
+// The role is always shown as words (never colour alone)
+export function roleLabel(role: string): string {
+  if (role === TREASURER) return "You're the Treasurer"
+  if (role === MEMBER) return "You're a Member"
+  if (role === ADMIN) return "You're an Admin"
+  return `Unknown role: ${role}`
+}
+
+=== web/src/lib/utils.ts
+export { cn } from "cn"
+
+=== web/src/main.tsx
+import { StrictMode } from 'react';
+import { createRoot } from 'react-dom/client';
+import { QueryClientProvider } from '@tanstack/react-query';
+import { ReactQueryDevtools } from '@tanstack/react-query-devtools';
+import App from './App';
+import { queryClient } from './lib/queryClient';
+
+// If you had an `import './index.css'` line here before, add it back above this comment.
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <QueryClientProvider client={queryClient}>
+      <App />
+      {/* Devtools are needed for the Shared phone screenshot */}
+      <ReactQueryDevtools initialIsOpen={false} />
+    </QueryClientProvider>
+  </StrictMode>,
+);
+
+=== web/src/state/selectedStokvel.ts
+import { useSyncExternalStore } from 'react';
+
+// The selected stokvel id lives ONLY here (not in browser storage), so sign-out can clear it
+let selectedId: string | null = null;
+const subscribers = new Set<() => void>();
+
+export function setSelectedStokvelId(id: string | null) {
+  selectedId = id;
+  subscribers.forEach((s) => s());
+}
+
+export function clearSelectedStokvel() {
+  setSelectedStokvelId(null);
+}
+
+export function useSelectedStokvelId(): string | null {
+  return useSyncExternalStore(
+    (callback) => {
+      subscribers.add(callback);
+      return () => {
+        subscribers.delete(callback);
+      };
+    },
+    () => selectedId,
+  );
+}
+
+=== web/src/theme/ThemeProvider.tsx
+// NEW: remembers the theme choice and puts the "dark" class on <html>. System follows the OS live.
+import { useEffect, useState, type ReactNode } from 'react'
+import { THEME_STORAGE_KEY, ThemeContext, type Theme } from './theme-context'
+
+// Storage can be blocked (private browsing), so every read and write is guarded
+function readStoredTheme(): Theme {
+  try {
+    const value = localStorage.getItem(THEME_STORAGE_KEY)
+    if (value === 'light' || value === 'dark' || value === 'system') return value
+  } catch {
+    // storage blocked: fall back to the default
+  }
+  return 'system'
+}
+
+function applyTheme(theme: Theme) {
+  const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
+  const dark = theme === 'dark' || (theme === 'system' && prefersDark)
+  document.documentElement.classList.toggle('dark', dark)
+  document.documentElement.style.colorScheme = dark ? 'dark' : 'light'
+}
+
+export function ThemeProvider({ children }: { children: ReactNode }) {
+  const [theme, setThemeState] = useState<Theme>(readStoredTheme)
+
+  useEffect(() => {
+    applyTheme(theme)
+    if (theme !== 'system') return
+    // System mode: re-apply whenever the operating system switches light/dark
+    const media = window.matchMedia('(prefers-color-scheme: dark)')
+    const onChange = () => applyTheme('system')
+    media.addEventListener('change', onChange)
+    return () => media.removeEventListener('change', onChange)
+  }, [theme])
+
+  function setTheme(next: Theme) {
+    setThemeState(next)
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, next)
+    } catch {
+      // storage blocked: the choice still works until the page reloads
+    }
+  }
+
+  return <ThemeContext.Provider value={{ theme, setTheme }}>{children}</ThemeContext.Provider>
+}
+
+=== web/src/theme/theme-context.ts
+// NEW: the theme "contract": which values exist and how components read/change them.
+import { createContext, useContext } from 'react'
+
+export type Theme = 'light' | 'dark' | 'system'
+export const THEME_STORAGE_KEY = 'ronditrack-theme'
+
+export type ThemeContextValue = { theme: Theme; setTheme: (theme: Theme) => void }
+export const ThemeContext = createContext<ThemeContextValue | null>(null)
+
+export function useTheme(): ThemeContextValue {
+  const value = useContext(ThemeContext)
+  if (!value) throw new Error('useTheme must be used inside ThemeProvider')
+  return value
+}
+
+=== schema.d.ts (contribution parts only)
+    "/api/v1/stokvels/{stokvelId}/cycles/{cycleId}/contributions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: {
+            parameters: {
+                query?: {
+                    PageSize?: number;
+                    PageToken?: string;
+                    Sort?: string;
+                    UserId?: string;
+                    DateFrom?: string;
+                    DateTo?: string;
+                };
+                header?: never;
+                path: {
+                    stokvelId: string;
+                    cycleId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["PagedResponseOfContributionDetailResponse"];
+                        "application/json": components["schemas"]["PagedResponseOfContributionDetailResponse"];
+                        "text/json": components["schemas"]["PagedResponseOfContributionDetailResponse"];
+                    };
+                };
+                /** @description Bad Request */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "text/plain": components["schemas"]["ProblemDetails"];
+                        "application/json": components["schemas"]["ProblemDetails"];
+                        "text/json": components["schemas"]["ProblemDetails"];
+        ContributionRequest: {
+            /** Format: uuid */
+            userId: string;
+            /** Format: uuid */
+            cycleId: string;
+            /** Format: double */
+            amount: number;
+        };
+        ContributionResponse: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            stokvelId: string;
+            /** Format: uuid */
+            userId: string;
+            /** Format: uuid */
+            cycleId: string;
+            /** Format: double */
+            amount: number;
+            /** Format: date-time */
+            recordedAtUtc: string;
+        ContributionResponse: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            stokvelId: string;
+            /** Format: uuid */
+            userId: string;
+            /** Format: uuid */
+            cycleId: string;
+            /** Format: double */
+            amount: number;
+            /** Format: date-time */
+            recordedAtUtc: string;
+        };
+        /** @enum {unknown} */
+        ContributionStatus: "Paid" | "Pending" | "Confirmed";
+        /** @enum {unknown} */
+        CycleStatus: "Open" | "PaidOut" | "Closed";
+        CycleSummaryResponse: {
+            /** Format: uuid */
+            id: string;
+        ProblemDetails: {
+            type?: null | string;
+            title?: null | string;
+            /** Format: int32 */
+            status?: null | number;
+            detail?: null | string;
+            instance?: null | string;
+        };
+        RegisterRequest: {
+            fullName: string;
+            email: string;
+            password: string;
+        };
+        StokvelRequest: {
+            name: string;
+            /** Format: double */
+            contributionAmount: number;
+            frequency: components["schemas"]["ContributionFrequency"];
+            /** Format: int32 */
+            maxMembers: number;
+        };
+
+=== API/Controllers/StokvelsController.cs
+using Microsoft.AspNetCore.RateLimiting;
+using RondiTrack.Web;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using RondiTrack.Api.Common.Paging;
+using RondiTrack.Auth;
+using RondiTrack.Common;
+using RondiTrack.Data;
+using RondiTrack.Domain;
+using RondiTrack.Dtos;
+using RondiTrack.Services;
+
+namespace RondiTrack.Controllers;
+
+[Route($"{ApiRoutes.V1}/stokvels")]
+[ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status401Unauthorized)]   // NEW 6.1: documented on every action
+[ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]      // NEW 6.1
+public class StokvelsController(
+    IStokvelRepository stokvels,
+    IStokvelMembershipService membershipService,
+    IContributionService contributionService,
+    MemberPagingService memberPaging,
+    IStokvelAccess access) : RondiControllerBase   // NEW 6.1: access = the 404/403 decision for the contribution check
+{
+    /// <summary>Lists all stokvels. Platform admins only.</summary>
+    [HttpGet]
+    [Authorize(Roles = AuthConstants.PlatformAdminRole)]   // NEW 6.1: the ONE plain role check in the whole API
+    [ProducesResponseType(typeof(IReadOnlyList<StokvelResponse>), StatusCodes.Status200OK)]
+    public async Task<ActionResult<IReadOnlyList<StokvelResponse>>> GetAll()
+    {
+        var all = await stokvels.GetAllAsync();
+        return Ok(all.Select(s => s.ToResponse()));
+    }
+
+    /// <summary>Gets a single stokvel by id. The ETag header is the concurrency token.</summary>
+    [HttpGet("{stokvelId:guid}")]
+    [RequireStokvelMember]   // NEW 6.1
+    [ProducesResponseType(typeof(StokvelResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<StokvelResponse>> GetById(Guid stokvelId)
+    {
+        var stokvel = await stokvels.GetByIdAsync(stokvelId) ?? throw new DomainNotFoundException($"Stokvel {stokvelId} was not found.");
+        ETagHelper.Set(Response, stokvel.Version);   // ADDED 5.3: token leaves the server
+        return Ok(stokvel.ToResponse());
+    }
+
+    /// <summary>Creates a new stokvel. Any signed-in user (see README gap about the creator).</summary>
+    [HttpPost]
+    [ProducesResponseType(typeof(StokvelResponse), StatusCodes.Status201Created)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    public async Task<ActionResult<StokvelResponse>> Create(StokvelRequest request)
+    {
+        var stokvel = new Stokvel(request.Name, request.ContributionAmount, request.Frequency, request.MaxMembers);
+        await stokvels.AddAsync(stokvel);
+
+        ETagHelper.Set(Response, stokvel.Version);   // ADDED 5.3
+        return CreatedAtAction(nameof(GetById), new { stokvelId = stokvel.Id }, stokvel.ToResponse());
+    }
+
+    /// <summary>Updates a stokvel's details. Treasurer or Admin only. Requires the If-Match header.</summary>
+    [HttpPut("{stokvelId:guid}")]
+    [RequireStokvelOfficer]   // NEW 6.1
+    [ProducesResponseType(typeof(StokvelResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status412PreconditionFailed)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status428PreconditionRequired)]
+    public async Task<ActionResult<StokvelResponse>> Update(
+        Guid stokvelId, StokvelRequest request, [FromHeader(Name = "If-Match")] string? ifMatch)
+    {
+        var expectedVersion = ETagHelper.ParseIfMatch(ifMatch);   // ADDED 5.3: the token is required
+
+        var stokvel = await stokvels.GetByIdAsync(stokvelId) ?? throw new DomainNotFoundException($"Stokvel {stokvelId} was not found.");
+        stokvel.UpdateDetails(request.Name, request.ContributionAmount, request.Frequency, request.MaxMembers);
+        stokvel.SetExpectedVersion(expectedVersion);   // ADDED 5.3: use the version the CLIENT saw
+        await stokvels.UpdateAsync(stokvel);
+
+        ETagHelper.Set(Response, stokvel.Version);     // ADDED 5.3: hand back the new token
+        return Ok(stokvel.ToResponse());
+    }
+
+    /// <summary>Deletes a stokvel. Treasurer or Admin only.</summary>
+    [HttpDelete("{stokvelId:guid}")]
+    [RequireStokvelOfficer]   // NEW 6.1
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> Delete(Guid stokvelId)
+    {
+        if (!await stokvels.DeleteAsync(stokvelId))
+            throw new DomainNotFoundException($"Stokvel {stokvelId} was not found.");
+        return NoContent();
+    }
+
+    /// <summary>
+    /// Lists a stokvel's members in rotation order. CHANGED 5.3: paged in the database.
+    /// Query: pageSize, pageToken.
+    /// </summary>
+    [HttpGet("{stokvelId:guid}/members")]
+    [RequireStokvelMember]   // NEW 6.1
+    [ProducesResponseType(typeof(PagedResponse<UserResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<PagedResponse<UserResponse>>> GetMembers(
+        Guid stokvelId, [FromQuery] int? pageSize, [FromQuery] string? pageToken, CancellationToken ct)
+    {
+        var result = await memberPaging.ListAsync(stokvelId, pageSize, pageToken, ct)
+            ?? throw new DomainNotFoundException($"Stokvel {stokvelId} was not found.");
+        return Ok(result);
+    }
+
+    /// <summary>Gets a single member of a stokvel.</summary>
+    [HttpGet("{stokvelId:guid}/members/{userId:guid}")]
+    [RequireStokvelMember]   // NEW 6.1
+    [ProducesResponseType(typeof(UserResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<UserResponse>> GetMember(Guid stokvelId, Guid userId)
+    {
+        var stokvel = await stokvels.GetByIdAsync(stokvelId) ?? throw new DomainNotFoundException($"Stokvel {stokvelId} was not found.");
+        var member = stokvel.FindMember(userId) ?? throw new DomainNotFoundException($"User {userId} was not found in this stokvel.");
+        return Ok(member.ToResponse());
+    }
+
+    /// <summary>Adds an existing user as a member. Treasurer or Admin only.</summary>
+    [HttpPost("{stokvelId:guid}/members")]
+    [RequireStokvelOfficer]   // NEW 6.1
+    [ProducesResponseType(typeof(UserResponse), StatusCodes.Status201Created)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status422UnprocessableEntity)]
+    public async Task<ActionResult<UserResponse>> AddMember(Guid stokvelId, AddMemberRequest request)
+    {
+        var user = await membershipService.AddMemberAsync(stokvelId, request.UserId);
+        return CreatedAtAction(nameof(GetMember), new { stokvelId, userId = user.Id }, user.ToResponse());
+    }
+
+    /// <summary>Removes a member from a stokvel. Treasurer or Admin only.</summary>
+    [HttpDelete("{stokvelId:guid}/members/{userId:guid}")]
+    [RequireStokvelOfficer]   // NEW 6.1
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> RemoveMember(Guid stokvelId, Guid userId)
+    {
+        await membershipService.RemoveMemberAsync(stokvelId, userId);
+        return NoContent();
+    }
+
+    /// <summary>
+    /// Records a contribution. A member may record their own; a Treasurer or Admin may record for anyone.
+    /// Requires an Idempotency-Key header.
+    /// </summary>
+    [HttpPost("{stokvelId:guid}/contributions")]
+    [EnableRateLimiting(RateLimitPolicies.Contribution)]
+    [RequireStokvelMember]   // NEW 6.1: must at least be a member (non-members get 404 before anything else)
+    [ProducesResponseType(typeof(ContributionResponse), StatusCodes.Status201Created)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status422UnprocessableEntity)]
+    public async Task<ActionResult<ContributionResponse>> RecordContribution(
+        Guid stokvelId, ContributionRequest request, [FromHeader(Name = "Idempotency-Key")] string? idempotencyKey)
+    {
+        // NEW 6.1: own contribution = ok, someone else's = officer only (403 otherwise)
+        await access.EnsureAsync(User, stokvelId, Policies.RecordContribution, request.UserId);
+
+        if (string.IsNullOrWhiteSpace(idempotencyKey))
+            throw new DomainValidationException("The Idempotency-Key header is required.");
+
+        var (response, replayed) = await contributionService.RecordContributionAsync(stokvelId, request, idempotencyKey);
+        if (replayed) Response.Headers[ApiHeaders.IdempotencyReplayed] = "true";
+        return StatusCode(StatusCodes.Status201Created, response);
+    }
+}
+
+=== API/Services/ContributionServices.cs
+using System.Security.Cryptography;
+using System.Text;
+using RondiTrack.Data;
+using RondiTrack.Domain;
+using RondiTrack.Dtos;
+using RondiTrack.Telemetry;   // NEW 6.2
+
+namespace RondiTrack.Services;
+
+public interface IContributionService
+{
+    Task<(ContributionResponse Response, bool WasReplayed)> RecordContributionAsync(
+        Guid stokvelId, ContributionRequest request, string idempotencyKey);
+}
+
+public sealed class ContributionService(
+    IStokvelRepository stokvels,
+    IUserRepository users,
+    IContributionCycleRepository cycles,
+    IContributionRepository contributions,
+    IIdempotencyStore idempotencyStore) : IContributionService
+{
+    public async Task<(ContributionResponse Response, bool WasReplayed)> RecordContributionAsync(
+        Guid stokvelId, ContributionRequest request, string idempotencyKey)
+    {
+        var requestHash = ComputeHash(stokvelId, request);
+
+        var existing = await idempotencyStore.GetAsync(idempotencyKey);
+        if (existing is not null)
+        {
+            if (existing.RequestHash != requestHash)
+                throw new DomainConflictException("This Idempotency-Key was already used with a different request body.");
+
+            return (existing.Response, true);
+        }
+
+        var stokvel = await stokvels.GetByIdAsync(stokvelId)
+            ?? throw new DomainNotFoundException($"Stokvel {stokvelId} was not found.");
+
+        var user = await users.GetByIdAsync(request.UserId)
+            ?? throw new DomainReferenceException($"User {request.UserId} does not exist.");
+
+        if (!stokvel.HasMember(user.Id))
+            throw new DomainReferenceException("That user is not a member of this stokvel.");   // CHANGED 6.2: no name, no stokvel name
+
+        var cycle = await cycles.GetByIdAsync(request.CycleId);
+        if (cycle is null || cycle.StokvelId != stokvelId)
+            throw new DomainReferenceException($"Cycle {request.CycleId} does not exist for this stokvel.");
+
+        if (await contributions.ExistsAsync(stokvelId, user.Id, request.CycleId))
+            throw new DomainConflictException("This member has already contributed for this cycle.");   // CHANGED 6.2: no name
+
+        var contribution = new Contribution(stokvelId, user.Id, request.CycleId, request.Amount);
+        await contributions.AddAsync(contribution);
+        RondiMetrics.ContributionRecorded();   // NEW 6.2: counted only after the row is really saved
+
+        var response = contribution.ToResponse();
+        await idempotencyStore.SaveAsync(idempotencyKey, new IdempotencyRecord(requestHash, response));
+
+        return (response, false);
+    }
+
+    private static string ComputeHash(Guid stokvelId, ContributionRequest request)
+    {
+        var raw = $"{stokvelId}|{request.UserId}|{request.CycleId}|{request.Amount}";
+        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(raw));
+        return Convert.ToHexString(bytes);
+    }
+}
+
+=== API/Dtos/ContributionDtos.cs
+using RondiTrack.Domain;
+
+namespace RondiTrack.Dtos;
+
+public sealed record ContributionRequest(Guid UserId, Guid CycleId, decimal Amount);
+
+public sealed record ContributionResponse(
+    Guid Id,
+    Guid StokvelId,
+    Guid UserId,
+    Guid CycleId,
+    decimal Amount,
+    DateTime RecordedAtUtc);
+
+// CHANGED 7.2: CycleId added, Amount is now integer cents (AmountCents), Status added, MemberEmail removed (nothing extra)
+public sealed record ContributionDetailResponse(
+    Guid Id,
+    Guid CycleId,
+    Guid UserId,
+    string MemberName,
+    StokvelRole Role,
+    int RotationPosition,
+    long AmountCents,
+    ContributionStatus Status,
+    DateTime RecordedAtUtc);
+
+=== API/Validators/ContributionRequestValidator.cs
+using FluentValidation;
+using RondiTrack.Dtos;
+
+namespace RondiTrack.Validators;
+
+public sealed class ContributionRequestValidator : AbstractValidator<ContributionRequest>
+{
+    public ContributionRequestValidator()
+    {
+        RuleFor(x => x.UserId).NotEmpty();
+        RuleFor(x => x.CycleId).NotEmpty();
+        RuleFor(x => x.Amount).GreaterThan(0);
+    }
+}
+
+=== API/Errors/RondiExceptionHandler.cs
+using FluentValidation;
+using Microsoft.AspNetCore.Diagnostics;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using Npgsql;
+using RondiTrack.Api.Common.Paging;
+using RondiTrack.Auth;
+using RondiTrack.Common;
+using RondiTrack.Domain;
+using RondiTrack.Telemetry;
+using RondiTrack.Web;
+using System.Text.Json;
+
+namespace RondiTrack.Errors;
+
+public sealed class RondiExceptionHandler(ILogger<RondiExceptionHandler> logger) : IExceptionHandler
+{
+    public async ValueTask<bool> TryHandleAsync(HttpContext httpContext, Exception exception, CancellationToken cancellationToken)
+    {
+        // UseExceptionHandler wipes response headers (including CORS), so put them back
+        await CorsSetup.ReapplyAsync(httpContext);
+
+        var correlationId = CorrelationId.For(httpContext);
+
+        var status = StatusCodes.Status500InternalServerError;
+        var title = "Internal Server Error";
+        var detail = "An unexpected error occurred.";
+        Dictionary<string, string[]>? errors = null;   // field -> messages, validation only
+
+        if (exception is ValidationException vex)
+        {
+            status = StatusCodes.Status400BadRequest;
+            title = "Validation Failed";
+            detail = "One or more fields are invalid.";
+            errors = vex.Errors
+                .GroupBy(e => JsonNamingPolicy.CamelCase.ConvertName(e.PropertyName))
+                .ToDictionary(g => g.Key, g => g.Select(e => e.ErrorMessage).ToArray());
+        }
+        else if (exception is DomainNotFoundException) { status = 404; title = "Not Found"; detail = exception.Message; }
+        else if (exception is DomainConflictException) { status = 409; title = "Conflict"; detail = exception.Message; }
+        else if (exception is DomainReferenceException) { status = 422; title = "Unprocessable Entity"; detail = exception.Message; }
+        else if (exception is DomainValidationException) { status = 400; title = "Bad Request"; detail = exception.Message; }
+        else if (exception is ApiBadRequestException) { status = 400; title = "Bad Request"; detail = exception.Message; }
+        else if (exception is PreconditionRequiredException) { status = 428; title = "Precondition Required"; detail = exception.Message; }
+        else if (exception is InvalidCredentialsException or InvalidRefreshTokenException)
+        {
+            status = 401; title = "Unauthorized"; detail = exception.Message;
+            httpContext.Response.Headers.WWWAuthenticate = "Bearer";
+        }
+        else if (exception is ForbiddenException) { status = 403; title = "Forbidden"; detail = exception.Message; }
+        else if (exception is DbUpdateConcurrencyException)
+        {
+            if (httpContext.Request.Headers.ContainsKey("If-Match"))
+            {
+                status = 412; title = "Precondition Failed";
+                detail = "This record was changed by someone else since you loaded it. Reload it and try again.";
+            }
+            else
+            {
+                status = 409; title = "Conflict";
+                detail = "This record was changed by someone else at the same time. Reload it and try again.";
+            }
+        }
+        else if (exception is DbUpdateException { InnerException: PostgresException { SqlState: PostgresErrorCodes.UniqueViolation } })
+        {
+            status = 409; title = "Conflict";
+            detail = "That record already exists (it would break a uniqueness rule).";
+        }
+
+        if (status >= 500)
+            logger.LogError(exception, "Request failed with status {Status}. CorrelationId: {CorrelationId}", status, correlationId);
+        else
+            logger.LogInformation("Request rejected with status {Status} ({ExceptionType}). CorrelationId: {CorrelationId}",
+                status, exception.GetType().Name, correlationId);
+
+        var problemDetails = new ProblemDetails { Status = status, Title = title, Detail = detail };
+        problemDetails.Extensions["correlationId"] = correlationId;
+        if (errors is not null) problemDetails.Extensions["errors"] = errors;
+
+        httpContext.Response.StatusCode = status;
+        httpContext.Response.ContentType = "application/problem+json";
+        await httpContext.Response.WriteAsync(JsonSerializer.Serialize(problemDetails), cancellationToken);
+        return true;
+    }
+}
+
+=== API/Web/CorsSetup.cs
+using Microsoft.AspNetCore.Cors.Infrastructure;
+
+namespace RondiTrack.Web;
+
+public static class CorsSetup
+{
+    public static IServiceCollection AddFrontendCors(this IServiceCollection services)
+    {
+        services.AddCors();
+        // Options pattern = read lazily, so test UseSetting overrides are always seen
+        services.AddOptions<CorsOptions>().Configure<IConfiguration>((o, config) =>
+        {
+            var origins = config.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? [];
+            if (origins.Any(x => x.Contains('*') || x.EndsWith('/')))
+                throw new InvalidOperationException("Cors:AllowedOrigins must be exact origins: no '*', no trailing slash.");
+
+            o.AddPolicy(CorsPolicies.Frontend, p => p
+                .WithOrigins(origins)                                   // empty list = nobody allowed
+                .WithMethods("GET", "POST", "PUT", "PATCH", "DELETE")
+                .WithHeaders("Content-Type", "Authorization", ApiHeaders.IdempotencyKey, "If-Match", "If-None-Match")
+                .WithExposedHeaders("Retry-After", ApiHeaders.IdempotencyReplayed, "ETag", "Location")
+                .AllowCredentials()
+                .SetPreflightMaxAge(TimeSpan.FromMinutes(10)));
+        });
+        return services;
+    }
+
+    /// The exception handler clears response headers, so CORS headers set earlier are lost on
+    /// exception-based errors (404/403/409/500). Call this at the top of the handler to put them back.
+    public static async Task ReapplyAsync(HttpContext ctx)
+    {
+        var sp = ctx.RequestServices;
+        if (sp is null) return;                                   // bare DefaultHttpContext in unit tests: nothing to reapply
+        var provider = sp.GetService<ICorsPolicyProvider>();
+        var service = sp.GetService<ICorsService>();
+        if (provider is null || service is null) return;          // CORS not registered
+        var policy = await provider.GetPolicyAsync(ctx, CorsPolicies.Frontend);
+        if (policy is null) return;
+        service.ApplyResult(service.EvaluatePolicy(ctx, policy), ctx.Response);
+    }
+}
+
+=== API/Web/RateLimitingSetup.cs
+using System.Security.Claims;
+using System.Threading.RateLimiting;
+using Microsoft.AspNetCore.RateLimiting;
+using RondiTrack.Telemetry;
+
+namespace RondiTrack.Web;
+
+public static class RateLimitingSetup
+{
+    public static IServiceCollection AddRondiRateLimiting(this IServiceCollection services)
+    {
+        services.AddRateLimiter(_ => { });
+        services.AddOptions<RateLimiterOptions>().Configure<IConfiguration>((o, cfg) =>
+        {
+            o.RejectionStatusCode = StatusCodes.Status429TooManyRequests;   // default is 503
+            o.OnRejected = WriteRejectionAsync;
+
+            var login = cfg.GetSection("RateLimiting:Login");
+            o.AddPolicy(RateLimitPolicies.Login, ctx =>
+                RateLimitPartition.GetFixedWindowLimiter(ClientIp(ctx), _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = login.GetValue("PermitLimit", 5),
+                    Window = TimeSpan.FromSeconds(login.GetValue("WindowSeconds", 60.0)),
+                    QueueLimit = 0,
+                    AutoReplenishment = true
+                }));
+
+            o.AddPolicy(RateLimitPolicies.Contribution, ctx =>
+                RateLimitPartition.GetTokenBucketLimiter(UserKey(ctx), _ => Bucket(cfg.GetSection("RateLimiting:Contribution"))));
+
+            o.AddPolicy(RateLimitPolicies.Payout, ctx =>
+                RateLimitPartition.GetTokenBucketLimiter(UserKey(ctx), _ => Bucket(cfg.GetSection("RateLimiting:Payout"))));
+        });
+        return services;
+    }
+
+    private static TokenBucketRateLimiterOptions Bucket(IConfigurationSection s) => new()
+    {
+        TokenLimit = s.GetValue("TokenLimit", 30),
+        TokensPerPeriod = s.GetValue("TokensPerPeriod", 5),
+        ReplenishmentPeriod = TimeSpan.FromSeconds(s.GetValue("ReplenishSeconds", 60.0)),
+        QueueLimit = 0,              // reject, never hold a money request open
+        AutoReplenishment = true
+    };
+
+    private static string ClientIp(HttpContext c) => "ip:" + (c.Connection.RemoteIpAddress?.ToString() ?? "unknown");
+
+    // signed-in user id; falls back to IP only for unauthenticated callers (they'll get 401 afterwards)
+    private static string UserKey(HttpContext c) =>
+        c.User.FindFirstValue("sub") is { Length: > 0 } sub ? "user:" + sub : ClientIp(c);
+
+    private static async ValueTask WriteRejectionAsync(OnRejectedContext ctx, CancellationToken ct)
+    {
+        var http = ctx.HttpContext;
+        var seconds = 1;
+        if (ctx.Lease.TryGetMetadata(MetadataName.RetryAfter, out var retry))
+            seconds = Math.Max(1, (int)Math.Ceiling(retry.TotalSeconds));
+
+        http.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+        http.Response.Headers.RetryAfter = seconds.ToString();
+
+        var problem = new Microsoft.AspNetCore.Mvc.ProblemDetails
+        {
+            Status = 429,
+            Title = "Too many requests",
+            Detail = $"Rate limit reached. Try again in {seconds} second(s).",
+            Type = "https://www.rfc-editor.org/rfc/rfc6585#section-4"
+        };
+        problem.Extensions["correlationId"] = CorrelationId.For(http);   // your 6.2 helper
+        await http.Response.WriteAsJsonAsync(problem, options: null, contentType: "application/problem+json", ct);
+    }
+}
+
+=== API/Dtos/HomeDtos.cs
+namespace RondiTrack.Dtos;
+
+public sealed record HomeResponse(IReadOnlyList<HomeStokvelDto> Stokvels);
+
+public sealed record HomeStokvelDto(
+    Guid StokvelId,
+    string Name,
+    StokvelRole Role,                // sent as a name: "Treasurer"
+    HomeCycleDto? CurrentCycle,      // null when no cycle is open
+    long PaidCents,                  // what I paid this cycle
+    long OwedCents,                  // max(0, due - paid)
+    DateTime? NextPayoutAt,          // CHANGED 7.2: DateTime (UTC) so it always ends in Z
+    long? ArrearsCents);             // NEW 7.2: MY OWN arrears in this stokvel, null when none. Never another member's.
+
+public sealed record HomeCycleDto(
+    Guid Id,
+    int Number,                      // NEW 7.2: the cycle number
+    CycleStatus Status,              // name, not number
+    DateTime StartsAt,               // CHANGED 7.2: DateTime (UTC), ends in Z
+    DateTime EndsAt);                // the due date

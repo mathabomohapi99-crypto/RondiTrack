@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { api, unwrap } from './client';
 import { queryKeys } from './queryKeys';
@@ -58,4 +59,28 @@ export function useContributions(stokvelId: string, cycleId: string | undefined)
     // "" and null both mean "no next page" (check 4), so || undefined handles both
     getNextPageParam: (lastPage) => lastPage.nextPageToken || undefined,
   });
+}
+
+// NEW 7.4: all members of a stokvel (only a Treasurer needs this, so it is switched on by `enabled`).
+export function useMembers(stokvelId: string, enabled: boolean) {
+  const query = useInfiniteQuery({
+    queryKey: queryKeys.members(stokvelId),
+    enabled,
+    initialPageParam: undefined as string | undefined,
+    queryFn: async ({ pageParam }) =>
+      unwrap(
+        await api.GET('/api/v1/stokvels/{stokvelId}/members', {
+          params: { path: { stokvelId }, query: { pageToken: pageParam } },
+        }),
+      ),
+    getNextPageParam: (lastPage) => lastPage.nextPageToken || undefined,
+  });
+
+  // Keep loading pages until there are no more, so the Treasurer can pick ANY member
+  const { hasNextPage, isFetchingNextPage, fetchNextPage } = query;
+  useEffect(() => {
+    if (hasNextPage && !isFetchingNextPage) void fetchNextPage();
+  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
+
+  return query;
 }

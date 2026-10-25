@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useStokvels } from '../api/queries';
+import { useHome } from '../api/queries';
 import {
   clearSelectedStokvel,
   setSelectedStokvelId,
@@ -10,7 +10,7 @@ import { Skeleton } from './Skeleton';
 import { StokvelScreen } from './StokvelScreen';
 
 export function Dashboard() {
-  const stokvels = useStokvels();
+  const stokvels = useHome(); // CHANGED 7.4: GET /stokvels is admin-only, /me/home lists MY stokvels
   const selectedId = useSelectedStokvelId();
   const [typedId, setTypedId] = useState('');
 
@@ -20,7 +20,7 @@ export function Dashboard() {
   }
 
   // ADJUST: this assumes GET /stokvels returns an array of { id, name }
-  const list = stokvels.data;
+  const list = stokvels.data.stokvels.map((s) => ({ id: s.stokvelId, name: s.name }));
   if (list.length === 0) {
     return <p>You are not in any stokvel yet. Ask a treasurer to add you.</p>;
   }
