@@ -1,4 +1,5 @@
 import { useContributions, useCycles, useStokvel } from '../api/queries';
+import { ContributionSection } from '../contributions/ContributionSection'; // NEW 7.4
 import { formatCentsAsRand } from '../lib/rand';
 import { ErrorView } from './ErrorView';
 import { Skeleton } from './Skeleton';
@@ -57,6 +58,9 @@ export function StokvelScreen({ stokvelId, onBack }: { stokvelId: string; onBack
       <h2>{stokvel.data.name}</h2>
       <p>Cycle {cycle.number}</p>
 
+      {/* NEW 7.4: the form (open cycle) or the reason there is no form (closed / paid out) */}
+      <ContributionSection stokvelId={stokvelId} cycle={cycle} />
+
       {/* 3) empty state: cycle exists but nobody has paid yet */}
       {rows.length === 0 ? (
         <p>
@@ -79,7 +83,7 @@ export function StokvelScreen({ stokvelId, onBack }: { stokvelId: string; onBack
               onClick={() => void contributions.fetchNextPage()}
               disabled={contributions.isFetchingNextPage}
             >
-              {contributions.isFetchingNextPage ? 'Loading…' : 'Load more'}
+              {contributions.isFetchingNextPage ? 'Loading...' : 'Load more'}
             </button>
           )}
         </>

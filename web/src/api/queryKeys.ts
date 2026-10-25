@@ -8,4 +8,6 @@ export const queryKeys = {
   // Changed: contributions belong to a cycle in my API, so the cycle id is in the key too
   contributions: (id: string, cycleId: string) =>
     ['stokvels', id, 'cycles', cycleId, 'contributions'] as const,
+  // NEW 7.4: the member list (a Treasurer picks from it)
+  members: (id: string) => ['stokvels', id, 'members'] as const,
 };

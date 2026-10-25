@@ -19,6 +19,7 @@ beforeEach(() => {
   vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
     const path = new URL(input instanceof Request ? input.url : String(input)).pathname;
     if (path.endsWith('/auth/refresh')) return json({ accessToken: 'tok' });
+    if (path.endsWith('/me/home')) return json({ stokvels: [{ stokvelId: 'a', name: 'Mabena Family' }, { stokvelId: 'b', name: 'Soweto Teachers' }] });
     if (path.endsWith('/api/v1/stokvels')) {
       return json([{ id: 'a', name: 'Mabena Family' }, { id: 'b', name: 'Soweto Teachers' }]);
     }
