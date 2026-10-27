@@ -798,3 +798,31 @@ I could not stop the PostgreSQL service because my Windows account has no permis
 - **Register returns 409 for an existing email**, because the assignment asks for it. That tells a stranger the email has an account. A real product would verify emails instead.
 - **Users made through `POST /api/users`** (platform admin only) have no password and cannot log in.
 - **POPIA to check:** the 409 message from `POST /api/users` includes the email address, and failed-request warnings log full stack traces.
+
+
+
+# Assignment 8.1: RondiTrack routes (Next.js 16)
+
+The full write-up (API check, routes, treasurer dashboard, client boundary, server-only proof, known gaps) is in [`web-next/README.md`](web-next/README.md).
+
+## What changed in the API
+Because the Next.js server calls the API on the person's behalf, three things were missing and were fixed in the API (not worked around in the frontend):
+- `GET /api/me`: who is signed in (id, name, email).
+- `GET /api/me/stokvels`: every stokvel I belong to with **my role in each**, paid and owed this cycle and the next payout date. A user in no stokvels gets `200` with `[]`.
+- `GET /api/stokvels/{id}` now also returns `myRole` and a `currentCycle` summary (collected amount, next payout date).
+
+Tests: `RondiTrack.Tests/MyStokvelsTests.cs` (6 new tests).
+
+```text
+Test summary: total: 66, failed: 0, succeeded: 66, skipped: 0
+```
+
+## Design decisions
+- The role is never stored in the token or the session. It belongs to a person **and a stokvel**, so the API returns it per stokvel.
+- `/dashboard/treasurer` is a filtered view (`stokvelsWhereTreasurer`), not a page behind a role check. Most people see an empty state, which is correct.
+- The browser never calls the API. The session lives in an encrypted, HttpOnly cookie on the Next.js site.
+
+## Gaps
+- Next payout date is calculated (cycle start + one period) because there is no payout schedule in the model.
+- Roles are still set in the database (no endpoint to change a role, from 6.1).
+- No login rate limit yet, so the "one IP for everyone" effect of the Next.js server is not visible today.
