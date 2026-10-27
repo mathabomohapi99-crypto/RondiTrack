@@ -1,4 +1,4 @@
-using RondiTrack.Domain;
+﻿using RondiTrack.Domain;
 
 namespace RondiTrack.Dtos;
 
@@ -7,7 +7,7 @@ public sealed record MeResponse(Guid Id, string FullName, string Email);
 
 // NEW 8.1: summary of the stokvel's current (open) cycle, already worked out by the API
 // NextPayoutDateUtc = when the cycle started + one period (weekly 7 days, fortnightly 14 days, monthly 1 month)
-public sealed record CycleSummaryResponse(
+public sealed record CurrentCycleSummaryResponse(
     Guid Id,
     int CycleNumber,
     decimal TargetAmount,
@@ -26,7 +26,7 @@ public sealed record MyStokvelResponse(
     decimal PaidThisCycle,
     decimal OwedThisCycle,
     DateTime? NextPayoutDateUtc,
-    CycleSummaryResponse? CurrentCycle);
+    CurrentCycleSummaryResponse? CurrentCycle);
 
 // NEW 8.1: stokvel detail = the old StokvelResponse fields + my role + current cycle summary
 // MyRole is null only for a platform admin who is not a member
@@ -41,4 +41,4 @@ public sealed record StokvelDetailResponse(
     decimal PayoutPerCycle,
     DateTime CreatedAtUtc,
     StokvelRole? MyRole,
-    CycleSummaryResponse? CurrentCycle);
+    CurrentCycleSummaryResponse? CurrentCycle);
