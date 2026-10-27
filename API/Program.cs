@@ -164,6 +164,7 @@ builder.Services.AddScoped<IStokvelMemberRepository, EfStokvelMemberRepository>(
 builder.Services.AddScoped<IContributionQueries, ContributionQueries>();
 builder.Services.AddScoped<ContributionPagingService>();
 builder.Services.AddScoped<MemberPagingService>();
+builder.Services.AddScoped<MyStokvelsService>();   // NEW 8.1: "my stokvels" and the stokvel detail summary
 builder.Services.AddScoped<IStokvelMembershipService, StokvelMembershipService>();
 builder.Services.AddScoped<IContributionService, ContributionService>();
 builder.Services.AddScoped<IPayoutFaultHook, NoOpPayoutFaultHook>();
