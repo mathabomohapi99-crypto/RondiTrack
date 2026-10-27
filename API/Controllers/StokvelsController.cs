@@ -17,7 +17,8 @@ public class StokvelsController(
     IStokvelRepository stokvels,
     IStokvelMembershipService membershipService,
     IContributionService contributionService,
-    MemberPagingService memberPaging,
+        MemberPagingService memberPaging,
+    MyStokvelsService summaries,   // NEW 8.1: adds my role + current cycle summary to the detail
     IStokvelAccess access) : RondiControllerBase   // NEW 6.1: access = the 404/403 decision for the contribution check
 {
     /// <summary>Lists all stokvels. Platform admins only.</summary>
@@ -30,16 +31,16 @@ public class StokvelsController(
         return Ok(all.Select(s => s.ToResponse()));
     }
 
-    /// <summary>Gets a single stokvel by id. The ETag header is the concurrency token.</summary>
+        /// <summary>Gets a single stokvel by id, with my role and the current cycle summary. The ETag header is the concurrency token.</summary>
     [HttpGet("{stokvelId:guid}")]
     [RequireStokvelMember]   // NEW 6.1
-    [ProducesResponseType(typeof(StokvelResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(StokvelDetailResponse), StatusCodes.Status200OK)]   // CHANGED 8.1
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
-    public async Task<ActionResult<StokvelResponse>> GetById(Guid stokvelId)
+    public async Task<ActionResult<StokvelDetailResponse>> GetById(Guid stokvelId, CancellationToken ct)   // CHANGED 8.1
     {
         var stokvel = await stokvels.GetByIdAsync(stokvelId) ?? throw new DomainNotFoundException($"Stokvel {stokvelId} was not found.");
         ETagHelper.Set(Response, stokvel.Version);   // ADDED 5.3: token leaves the server
-        return Ok(stokvel.ToResponse());
+        return Ok(await summaries.GetDetailAsync(stokvel, User.GetUserId(), ct));   // CHANGED 8.1: role + cycle summary added
     }
 
     /// <summary>Creates a new stokvel. Any signed-in user (see README gap about the creator).</summary>
