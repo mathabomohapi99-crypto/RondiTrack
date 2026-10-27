@@ -1,0 +1,13 @@
+{
+  "name": "ronditrack-client",
+  "private": true,
+  "scripts": {
+    "generate": "openapi-typescript http://localhost:5134/openapi/v1.json -o src/schema.d.ts",
+    "check": "tsc --noEmit --strict",
+    "all": "npm run generate && npm run check"
+  },
+  "devDependencies": {
+    "openapi-typescript": "7.10.1",
+    "typescript": "5.9.3"
+  }
+}

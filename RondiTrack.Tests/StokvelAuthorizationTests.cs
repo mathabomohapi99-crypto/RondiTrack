@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using Microsoft.EntityFrameworkCore;
@@ -58,7 +58,7 @@ public class StokvelAuthorizationTests(PostgresApiFactory factory)
 
     private static Task<HttpResponseMessage> RecordAsync(HttpClient client, Guid stokvelId, Guid userId, Guid cycleId)
     {
-        var request = new HttpRequestMessage(HttpMethod.Post, $"/api/stokvels/{stokvelId}/contributions")
+        var request = new HttpRequestMessage(HttpMethod.Post, $"/api/v1/stokvels/{stokvelId}/contributions")
         {
             Content = JsonContent.Create(new { UserId = userId, CycleId = cycleId, Amount = 100m })
         };
@@ -68,14 +68,14 @@ public class StokvelAuthorizationTests(PostgresApiFactory factory)
 
     // the endpoint used for the 404 / 403 / 201 comparison: open a cycle (officer only)
     private static Task<HttpResponseMessage> OpenCycleAsync(HttpClient client, Guid stokvelId) =>
-        client.PostAsJsonAsync($"/api/stokvels/{stokvelId}/cycles", new { CycleNumber = 2, TargetAmount = 100m });
+        client.PostAsJsonAsync($"/api/v1/stokvels/{stokvelId}/cycles", new { CycleNumber = 2, TargetAmount = 100m });
 
     // ---- 401 ----
 
     [Fact]
     public async Task Request_With_No_Token_Returns_401_Problem()
     {
-        var response = await factory.CreateAnonymousClient().GetAsync($"/api/stokvels/{Guid.NewGuid()}");
+        var response = await factory.CreateAnonymousClient().GetAsync($"/api/v1/stokvels/{Guid.NewGuid()}");
 
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
         Assert.Equal("application/problem+json", response.Content.Headers.ContentType?.MediaType);
@@ -87,7 +87,7 @@ public class StokvelAuthorizationTests(PostgresApiFactory factory)
         var client = factory.CreateAnonymousClient();
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "not.a.real-token");
 
-        var response = await client.GetAsync($"/api/stokvels/{Guid.NewGuid()}");
+        var response = await client.GetAsync($"/api/v1/stokvels/{Guid.NewGuid()}");
 
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
         Assert.Equal("application/problem+json", response.Content.Headers.ContentType?.MediaType);
@@ -152,8 +152,8 @@ public class StokvelAuthorizationTests(PostgresApiFactory factory)
         var fakeId = Guid.NewGuid();
         var client = factory.CreateClientFor(outsider);
 
-        var real = await client.GetAsync($"/api/stokvels/{realId}");
-        var fake = await client.GetAsync($"/api/stokvels/{fakeId}");
+        var real = await client.GetAsync($"/api/v1/stokvels/{realId}");
+        var fake = await client.GetAsync($"/api/v1/stokvels/{fakeId}");
 
         Assert.Equal(HttpStatusCode.NotFound, real.StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, fake.StatusCode);
@@ -177,9 +177,9 @@ public class StokvelAuthorizationTests(PostgresApiFactory factory)
         var (stokvelId, cycleId) = await SeedStokvelAsync((member, StokvelRole.Member));
         var client = factory.CreateClientFor(member);
 
-        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync($"/api/stokvels/{stokvelId}")).StatusCode);
-        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync($"/api/stokvels/{stokvelId}/cycles")).StatusCode);
-        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync($"/api/stokvels/{stokvelId}/cycles/{cycleId}/contributions")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync($"/api/v1/stokvels/{stokvelId}")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync($"/api/v1/stokvels/{stokvelId}/cycles")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync($"/api/v1/stokvels/{stokvelId}/cycles/{cycleId}/contributions")).StatusCode);
     }
 
     [Fact]
@@ -227,7 +227,7 @@ public class StokvelAuthorizationTests(PostgresApiFactory factory)
         var (stokvelId, cycleId) = await SeedStokvelAsync((treasurer, StokvelRole.Treasurer), (member, StokvelRole.Member));
         await AddContributionAsync(stokvelId, member, cycleId);   // a payout needs at least one contribution
 
-        var url = $"/api/stokvels/{stokvelId}/cycles/{cycleId}/payouts";
+        var url = $"/api/v1/stokvels/{stokvelId}/cycles/{cycleId}/payouts";
 
         var asMember = await factory.CreateClientFor(member).PostAsync(url, null);
         Assert.Equal(HttpStatusCode.Forbidden, asMember.StatusCode);
@@ -244,7 +244,7 @@ public class StokvelAuthorizationTests(PostgresApiFactory factory)
         var (stokvelId, cycleId) = await SeedStokvelAsync((member, StokvelRole.Treasurer));
 
         var response = await factory.CreateClientFor(outsider)
-            .PostAsync($"/api/stokvels/{stokvelId}/cycles/{cycleId}/payouts", null);
+            .PostAsync($"/api/v1/stokvels/{stokvelId}/cycles/{cycleId}/payouts", null);
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
@@ -258,11 +258,11 @@ public class StokvelAuthorizationTests(PostgresApiFactory factory)
         var (stokvelId, _) = await SeedStokvelAsync((treasurer, StokvelRole.Treasurer));
         var client = factory.CreateClientFor(treasurer);   // ONE token, used before and after
 
-        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync($"/api/stokvels/{stokvelId}")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync($"/api/v1/stokvels/{stokvelId}")).StatusCode);
 
         await RemoveMembershipAsync(stokvelId, treasurer);   // the chairperson removes them
 
         // same token, still not expired, but the database says they are out
-        Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync($"/api/stokvels/{stokvelId}")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync($"/api/v1/stokvels/{stokvelId}")).StatusCode);
     }
 }

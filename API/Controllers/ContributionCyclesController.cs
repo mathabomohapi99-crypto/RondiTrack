@@ -9,26 +9,27 @@ using RondiTrack.Services;
 
 namespace RondiTrack.Controllers;
 
-[Route("api/stokvels/{stokvelId:guid}/cycles")]
+[Route($"{ApiRoutes.V1}/stokvels/{{stokvelId:guid}}/cycles")]
 [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status401Unauthorized)]   // NEW 6.1
 [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]      // NEW 6.1
 public class ContributionCyclesController(
     IContributionCycleRepository cycles,
     IStokvelRepository stokvels,
-    ContributionPagingService contributionPaging) : RondiControllerBase   // CHANGED 5.3: paging service replaces the strategy switch
+    ContributionPagingService contributionPaging,
+    ICycleSummaryService cycleSummaries) : RondiControllerBase   // CHANGED 5.3: paging service replaces the strategy switch
 {
     /// <summary>Lists a stokvel's contribution cycles.</summary>
     [HttpGet]
     [RequireStokvelMember]   // NEW 6.1
-    [ProducesResponseType(typeof(IReadOnlyList<ContributionCycleResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(IReadOnlyList<CycleSummaryResponse>), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
-    public async Task<ActionResult<IReadOnlyList<ContributionCycleResponse>>> GetAll(Guid stokvelId)
+    public async Task<ActionResult<IReadOnlyList<CycleSummaryResponse>>> GetAll(Guid stokvelId, CancellationToken ct)
     {
         if (await stokvels.GetByIdAsync(stokvelId) is null)
             throw new DomainNotFoundException($"Stokvel {stokvelId} was not found.");
 
-        var all = await cycles.GetByStokvelAsync(stokvelId);
-        return Ok(all.Select(c => c.ToResponse()));
+        var all = await cycleSummaries.ListAsync(stokvelId, ct);   // CHANGED 7.2: newest first, with status, due date and totals
+        return Ok(all);
     }
 
     /// <summary>Gets a single contribution cycle. The ETag header is the concurrency token.</summary>

@@ -14,7 +14,8 @@ public class RondiTrackDbContext : DbContext
     public DbSet<Contribution> Contributions => Set<Contribution>();
     public DbSet<Payout> Payouts => Set<Payout>();
     public DbSet<RefreshToken> RefreshTokens => Set<RefreshToken>();   // NEW 6.1
-
+        public DbSet<Arrear> Arrears => Set<Arrear>();                              // 6.4
+    public DbSet<IdempotencyEntry> IdempotencyEntries => Set<IdempotencyEntry>();   // 6.4
     protected override void OnModelCreating(ModelBuilder b)
     {
         b.Entity<User>(e =>
@@ -76,12 +77,17 @@ public class RondiTrackDbContext : DbContext
              .WithMany(s => s.Cycles)
              .HasForeignKey(c => c.StokvelId)
              .OnDelete(DeleteBehavior.Cascade);
+
+                         // 6.4: lets the job find "open cycles that have an end date" without scanning every cycle
+            e.HasIndex(c => c.EndsOn).HasFilter("\"ClosedAtUtc\" IS NULL").HasDatabaseName("IX_ContributionCycles_EndsOn_Open");
+
         });
 
         b.Entity<Contribution>(e =>
         {
             e.HasKey(c => c.Id);
             e.Property(c => c.Amount).HasPrecision(18, 2);
+            e.Property(c => c.Status).HasConversion<string>().HasMaxLength(20).HasDefaultValue(ContributionStatus.Paid);   // 7.2
 
             // CHANGED 5.3: now UNIQUE. Database-level version of the C# rule
             // "a member contributes once per cycle" (ContributionService -> ExistsAsync).
@@ -124,13 +130,31 @@ public class RondiTrackDbContext : DbContext
             e.HasKey(t => t.Id);
             e.Property(t => t.TokenHash).HasMaxLength(64).IsRequired();   // SHA-256 as 64 hex characters
             e.HasIndex(t => t.TokenHash).IsUnique();                      // lookup by hash, and no duplicates
-            e.HasIndex(t => t.FamilyId);                                  // revoke a whole family fast
+            e.HasIndex(t => t.FamilyId);       
+            e.HasIndex(t => t.ExpiresAtUtc);   // 6.4: housekeeping deletes by expiry                           // revoke a whole family fast
 
             // deleting a user also deletes their sessions (no navigation property needed)
             e.HasOne<User>()
              .WithMany()
              .HasForeignKey(t => t.UserId)
              .OnDelete(DeleteBehavior.Cascade);
+
+                     // 6.4: arrears. UNIQUE (cycle, member) = the database refuses a second arrear for the same member and cycle
+        b.Entity<Arrear>(e =>
+        {
+            e.HasKey(a => a.Id);
+            e.HasIndex(a => new { a.CycleId, a.UserId }).IsUnique();
+            e.HasOne<ContributionCycle>().WithMany().HasForeignKey(a => a.CycleId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // 6.4: idempotency records in the database
+        b.Entity<IdempotencyEntry>(e =>
+        {
+            e.HasKey(x => x.Key);
+            e.Property(x => x.RequestHash).HasMaxLength(64).IsRequired();
+            e.Property(x => x.ResponseJson).IsRequired();
+            e.HasIndex(x => x.CreatedAtUtc);   // housekeeping deletes by age
+        });
         });
     }
 }

@@ -16,13 +16,13 @@ public class UntrackedReadTests(PostgresApiFactory factory)
     [Fact]
     public async Task Update_User_Persists_After_Untracked_Read()
     {
-        var created = await _client.PostAsJsonAsync("/api/users",
+        var created = await _client.PostAsJsonAsync("/api/v1/users",
             new { FullName = "Before Rename", Email = $"before{Guid.NewGuid()}@example.com" });
         var user = (await created.Content.ReadFromJsonAsync<UserDto>())!;
         var etag = created.Headers.ETag!.Tag;   // EDIT 5.3: the token comes back with the response
 
         var newName = $"Renamed {Guid.NewGuid()}";
-        var request = new HttpRequestMessage(HttpMethod.Put, $"/api/users/{user.Id}")
+        var request = new HttpRequestMessage(HttpMethod.Put, $"/api/v1/users/{user.Id}")
         {
             Content = JsonContent.Create(new { FullName = newName, Email = $"after{Guid.NewGuid()}@example.com" })
         };
@@ -30,7 +30,7 @@ public class UntrackedReadTests(PostgresApiFactory factory)
         var put = await _client.SendAsync(request);
         Assert.Equal(HttpStatusCode.OK, put.StatusCode);
 
-        var get = await _client.GetFromJsonAsync<UserDto>($"/api/users/{user.Id}");
+        var get = await _client.GetFromJsonAsync<UserDto>($"/api/v1/users/{user.Id}");
         Assert.Equal(newName, get!.FullName);
     }
 

@@ -15,7 +15,7 @@ public class IntegrationTests(PostgresApiFactory factory)
     public async Task Create_User_With_Valid_Data_Returns_201()
     {
         var payload = new { FullName = "Zanele Mthembu", Email = $"zanele{Guid.NewGuid()}@example.com" };
-        var response = await _client.PostAsJsonAsync("/api/users", payload);
+        var response = await _client.PostAsJsonAsync("/api/v1/users", payload);
         Assert.Equal(HttpStatusCode.Created, response.StatusCode);
     }
 
@@ -23,7 +23,7 @@ public class IntegrationTests(PostgresApiFactory factory)
     public async Task Create_Stokvel_With_Valid_Data_Returns_201()
     {
         var payload = new { Name = $"Test Stokvel {Guid.NewGuid()}", ContributionAmount = 100m, Frequency = 1, MaxMembers = 5 };
-        var response = await _client.PostAsJsonAsync("/api/stokvels", payload);
+        var response = await _client.PostAsJsonAsync("/api/v1/stokvels", payload);
         Assert.Equal(HttpStatusCode.Created, response.StatusCode);
     }
 
@@ -31,7 +31,7 @@ public class IntegrationTests(PostgresApiFactory factory)
     public async Task Create_Stokvel_With_MaxMembers_Below_Minimum_Returns_400()
     {
         var payload = new { Name = "Bad Stokvel", ContributionAmount = 100m, Frequency = 1, MaxMembers = 1 };
-        var response = await _client.PostAsJsonAsync("/api/stokvels", payload);
+        var response = await _client.PostAsJsonAsync("/api/v1/stokvels", payload);
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         Assert.Equal("application/problem+json", response.Content.Headers.ContentType?.MediaType);
     }
@@ -39,7 +39,7 @@ public class IntegrationTests(PostgresApiFactory factory)
     [Fact]
     public async Task Get_Stokvel_That_Does_Not_Exist_Returns_404()
     {
-        var response = await _client.GetAsync($"/api/stokvels/{Guid.NewGuid()}");
+        var response = await _client.GetAsync($"/api/v1/stokvels/{Guid.NewGuid()}");
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
         Assert.Equal("application/problem+json", response.Content.Headers.ContentType?.MediaType);
     }
@@ -52,9 +52,9 @@ public class IntegrationTests(PostgresApiFactory factory)
         var user2 = await CreateUserAsync();
         var user3 = await CreateUserAsync();
 
-        await _client.PostAsJsonAsync($"/api/stokvels/{stokvel.Id}/members", new { UserId = user1.Id });
-        await _client.PostAsJsonAsync($"/api/stokvels/{stokvel.Id}/members", new { UserId = user2.Id });
-        var response = await _client.PostAsJsonAsync($"/api/stokvels/{stokvel.Id}/members", new { UserId = user3.Id });
+        await _client.PostAsJsonAsync($"/api/v1/stokvels/{stokvel.Id}/members", new { UserId = user1.Id });
+        await _client.PostAsJsonAsync($"/api/v1/stokvels/{stokvel.Id}/members", new { UserId = user2.Id });
+        var response = await _client.PostAsJsonAsync($"/api/v1/stokvels/{stokvel.Id}/members", new { UserId = user3.Id });
 
         Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
         Assert.Equal("application/problem+json", response.Content.Headers.ContentType?.MediaType);
@@ -64,7 +64,7 @@ public class IntegrationTests(PostgresApiFactory factory)
     public async Task AddMember_With_NonExistent_User_Returns_422()
     {
         var stokvel = await CreateStokvelAsync(5);
-        var response = await _client.PostAsJsonAsync($"/api/stokvels/{stokvel.Id}/members", new { UserId = Guid.NewGuid() });
+        var response = await _client.PostAsJsonAsync($"/api/v1/stokvels/{stokvel.Id}/members", new { UserId = Guid.NewGuid() });
         Assert.Equal(HttpStatusCode.UnprocessableEntity, response.StatusCode);
         Assert.Equal("application/problem+json", response.Content.Headers.ContentType?.MediaType);
     }
@@ -117,7 +117,7 @@ public class IntegrationTests(PostgresApiFactory factory)
     {
         var (stokvelId, userId, cycleId) = await SeedStokvelWithMemberAndCycleAsync();
         var payload = new { UserId = userId, CycleId = cycleId, Amount = 100m };
-        var response = await _client.PostAsJsonAsync($"/api/stokvels/{stokvelId}/contributions", payload);
+        var response = await _client.PostAsJsonAsync($"/api/v1/stokvels/{stokvelId}/contributions", payload);
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
@@ -127,7 +127,7 @@ public class IntegrationTests(PostgresApiFactory factory)
     public async Task GetMembers_For_Stokvel_With_No_Members_Returns_Empty_List()
     {
         var stokvel = await CreateStokvelAsync(5);
-        var response = await _client.GetAsync($"/api/stokvels/{stokvel.Id}/members");
+        var response = await _client.GetAsync($"/api/v1/stokvels/{stokvel.Id}/members");
 
         // EDIT 5.3: the endpoint is paged now, so the body is { items: [], nextPageToken: "" }, not a bare array.
         var page = await response.Content.ReadFromJsonAsync<MembersPageDto>();
@@ -140,7 +140,7 @@ public class IntegrationTests(PostgresApiFactory factory)
     public async Task Create_Stokvel_With_MaxMembers_At_Exactly_The_Minimum_Boundary_Succeeds()
     {
         var payload = new { Name = $"Boundary Stokvel {Guid.NewGuid()}", ContributionAmount = 100m, Frequency = 1, MaxMembers = 2 };
-        var response = await _client.PostAsJsonAsync("/api/stokvels", payload);
+        var response = await _client.PostAsJsonAsync("/api/v1/stokvels", payload);
         Assert.Equal(HttpStatusCode.Created, response.StatusCode);
     }
 
@@ -160,7 +160,7 @@ public class IntegrationTests(PostgresApiFactory factory)
 
     private async Task<HttpResponseMessage> SendContributionAsync(Guid stokvelId, object payload, string key)
     {
-        var request = new HttpRequestMessage(HttpMethod.Post, $"/api/stokvels/{stokvelId}/contributions")
+        var request = new HttpRequestMessage(HttpMethod.Post, $"/api/v1/stokvels/{stokvelId}/contributions")
         {
             Content = JsonContent.Create(payload)
         };
@@ -171,14 +171,14 @@ public class IntegrationTests(PostgresApiFactory factory)
     private async Task<StokvelResponseDto> CreateStokvelAsync(int maxMembers)
     {
         var payload = new { Name = $"Stokvel {Guid.NewGuid()}", ContributionAmount = 100m, Frequency = 1, MaxMembers = maxMembers };
-        var response = await _client.PostAsJsonAsync("/api/stokvels", payload);
+        var response = await _client.PostAsJsonAsync("/api/v1/stokvels", payload);
         return (await response.Content.ReadFromJsonAsync<StokvelResponseDto>())!;
     }
 
     private async Task<UserResponseDto> CreateUserAsync()
     {
         var payload = new { FullName = $"Test User {Guid.NewGuid()}", Email = $"user{Guid.NewGuid()}@example.com" };
-        var response = await _client.PostAsJsonAsync("/api/users", payload);
+        var response = await _client.PostAsJsonAsync("/api/v1/users", payload);
         return (await response.Content.ReadFromJsonAsync<UserResponseDto>())!;
     }
 
@@ -186,10 +186,10 @@ public class IntegrationTests(PostgresApiFactory factory)
     {
         var stokvel = await CreateStokvelAsync(5);
         var user = await CreateUserAsync();
-        await _client.PostAsJsonAsync($"/api/stokvels/{stokvel.Id}/members", new { UserId = user.Id });
+        await _client.PostAsJsonAsync($"/api/v1/stokvels/{stokvel.Id}/members", new { UserId = user.Id });
 
         var cyclePayload = new { CycleNumber = 1, TargetAmount = 100m };
-        var cycleResponse = await _client.PostAsJsonAsync($"/api/stokvels/{stokvel.Id}/cycles", cyclePayload);
+        var cycleResponse = await _client.PostAsJsonAsync($"/api/v1/stokvels/{stokvel.Id}/cycles", cyclePayload);
         var cycle = (await cycleResponse.Content.ReadFromJsonAsync<CycleResponseDto>())!;
 
         return (stokvel.Id, user.Id, cycle.Id);

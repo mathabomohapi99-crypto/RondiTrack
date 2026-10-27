@@ -12,6 +12,14 @@ public sealed class ContributionCycle
     // ADDED 5.3: PostgreSQL's built-in row version (xmin). Not a real column.
     public uint Version { get; private set; }
 
+    // 6.4: last day of the cycle, as a calendar date in the stokvel's time zone (Africa/Johannesburg). null = no end date, job ignores it
+    // CHANGED: moved up inside the class (it was outside the class before, which broke the build)
+    public DateOnly? EndsOn { get; private set; }
+
+    // 6.4: set ONCE by a conditional UPDATE ... WHERE ClosedAtUtc IS NULL. This is the "exactly once" marker.
+    // CHANGED: moved up inside the class
+    public DateTime? ClosedAtUtc { get; private set; }
+
     // Real navigation (the second one-to-many: Stokvel -> ContributionCycle)
     public Stokvel Stokvel { get; private set; } = null!;
 
@@ -29,6 +37,20 @@ public sealed class ContributionCycle
         CycleNumber = cycleNumber;
         TargetAmount = targetAmount;
         CreatedAtUtc = DateTime.UtcNow;
+    }
+
+    // 6.4: constructor for the job. Time is passed in, so nothing here touches DateTime.UtcNow
+    // CHANGED: moved up inside the class
+    public ContributionCycle(Guid stokvelId, int cycleNumber, decimal targetAmount, DateOnly endsOn, DateTime createdAtUtc)
+    {
+        if (cycleNumber < 1) throw new DomainValidationException("Cycle number must be 1 or greater.");
+        if (targetAmount <= 0) throw new DomainValidationException("Target amount must be greater than zero.");
+        Id = Guid.NewGuid();
+        StokvelId = stokvelId;
+        CycleNumber = cycleNumber;
+        TargetAmount = targetAmount;
+        EndsOn = endsOn;
+        CreatedAtUtc = createdAtUtc;
     }
 
     // ADDED 5.3: "the client last saw THIS version". Called before saving an update from a PUT.

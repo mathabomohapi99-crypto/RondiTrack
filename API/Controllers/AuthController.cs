@@ -1,3 +1,6 @@
+﻿using Microsoft.AspNetCore.RateLimiting;
+using RondiTrack.Web;
+using RondiTrack.Common;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using RondiTrack.Auth;
@@ -5,7 +8,7 @@ using RondiTrack.Dtos;
 
 namespace RondiTrack.Controllers;
 
-[Route("api/auth")]
+[Route($"{ApiRoutes.V1}/auth")]
 [AllowAnonymous]   // all four endpoints work without an access token
 public class AuthController(IAuthService auth) : RondiControllerBase
 {
@@ -17,11 +20,12 @@ public class AuthController(IAuthService auth) : RondiControllerBase
     public async Task<ActionResult<UserResponse>> Register(RegisterRequest request)
     {
         var user = await auth.RegisterAsync(request);
-        return Created($"/api/users/{user.Id}", user.ToResponse());
+        return Created($"{ApiRoutes.V1Prefix}/users/{user.Id}", user.ToResponse());
     }
 
     /// <summary>Signs in. Returns the access token in the body and sets the refresh token as a cookie.</summary>
     [HttpPost("login")]
+    [EnableRateLimiting(RateLimitPolicies.Login)]
     [ProducesResponseType(typeof(AuthResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status401Unauthorized)]
     public async Task<ActionResult<AuthResponse>> Login(LoginRequest request) =>

@@ -56,7 +56,11 @@ public sealed class AuthService(
 
         if (user is null || user.PasswordHash is null || outcome == PasswordVerificationResult.Failed)
         {
-            logger.LogWarning("Login failed");   // no email in the log (POPIA)
+            // CHANGED 6.2: never the typed email. Our own user id when the account exists, so a guessing attack on one account is visible.
+            if (user is null)
+                logger.LogWarning("Login failed: no matching account");
+            else
+                logger.LogWarning("Login failed for user {UserId}", user.Id);
             throw new InvalidCredentialsException();   // same 401 message for both cases
         }
 

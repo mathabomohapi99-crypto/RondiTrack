@@ -4,6 +4,9 @@ namespace RondiTrack.Dtos;
 
 public sealed record ContributionRequest(Guid UserId, Guid CycleId, decimal Amount);
 
+// NEW 7.4: body of the cents endpoint. The cycle id comes from the URL, the amount is integer cents.
+public sealed record RecordContributionRequest(Guid UserId, long AmountInCents);
+
 public sealed record ContributionResponse(
     Guid Id,
     Guid StokvelId,
@@ -12,13 +15,14 @@ public sealed record ContributionResponse(
     decimal Amount,
     DateTime RecordedAtUtc);
 
-// New. The shape the contributions-by-cycle endpoint returns
+// CHANGED 7.2: CycleId added, Amount is now integer cents (AmountCents), Status added, MemberEmail removed (nothing extra)
 public sealed record ContributionDetailResponse(
     Guid Id,
+    Guid CycleId,
     Guid UserId,
     string MemberName,
-    string MemberEmail,
     StokvelRole Role,
     int RotationPosition,
-    decimal Amount,
+    long AmountCents,
+    ContributionStatus Status,
     DateTime RecordedAtUtc);

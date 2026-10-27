@@ -67,7 +67,7 @@ public sealed class Stokvel
 
         if (validMax < _members.Count)
             throw new DomainConflictException(
-                $"Cannot reduce capacity to {validMax}: '{validName}' already has {_members.Count} members.");
+                $"Cannot reduce capacity to {validMax}: this stokvel already has {_members.Count} members.");   // CHANGED 6.2: no stokvel name
 
         Name = validName;
         ContributionAmount = validAmount;
@@ -80,10 +80,10 @@ public sealed class Stokvel
         ArgumentNullException.ThrowIfNull(user);
 
         if (HasMember(user.Id))
-            throw new DomainConflictException($"{user.FullName} is already a member of '{Name}'.");
+            throw new DomainConflictException("That user is already a member of this stokvel.");   // CHANGED 6.2: no name
 
         if (IsFull)
-            throw new DomainConflictException($"'{Name}' is full ({MaxMembers} members).");
+            throw new DomainConflictException($"This stokvel is full ({MaxMembers} members).");   // CHANGED 6.2: no stokvel name
 
         _members.Add(user);
     }

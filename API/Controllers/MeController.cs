@@ -1,19 +1,24 @@
 using Microsoft.AspNetCore.Mvc;
 using RondiTrack.Auth;
+using RondiTrack.Common;
 using RondiTrack.Dtos;
 using RondiTrack.Services;
 
 namespace RondiTrack.Controllers;
 
-// NEW 8.1: endpoints about the signed-in person. No id in the URL, so nobody can ask about someone else.
-[Route("api/me")]
+[Route($"{ApiRoutes.V1}/me")]
 [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status401Unauthorized)]
-public class MeController(IUserRepository users, MyStokvelsService myStokvels) : RondiControllerBase
+public sealed class MeController(IHomeService home, IUserRepository users, MyStokvelsService myStokvels) : RondiControllerBase
 {
+    /// <summary>One response for the member's home screen: every stokvel they belong to.</summary>
+    [HttpGet("home")]
+    [ProducesResponseType(typeof(HomeResponse), StatusCodes.Status200OK)]
+    public async Task<ActionResult<HomeResponse>> Home(CancellationToken ct) =>
+        Ok(await home.GetAsync(User.GetUserId()!.Value, ct));
+
     /// <summary>Who am I? Returns the signed-in user's id, name and email.</summary>
     [HttpGet]
     [ProducesResponseType(typeof(MeResponse), StatusCodes.Status200OK)]
-    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
     public async Task<ActionResult<MeResponse>> GetMe()
     {
         var userId = User.GetUserId() ?? throw new DomainNotFoundException("User was not found.");
@@ -21,7 +26,7 @@ public class MeController(IUserRepository users, MyStokvelsService myStokvels) :
         return Ok(new MeResponse(user.Id, user.FullName, user.Email));
     }
 
-    /// <summary>Lists every stokvel I belong to, with MY role in each. No stokvels = 200 with an empty list.</summary>
+    /// <summary>Every stokvel I belong to, with MY role in each. No stokvels = 200 with an empty list.</summary>
     [HttpGet("stokvels")]
     [ProducesResponseType(typeof(IReadOnlyList<MyStokvelResponse>), StatusCodes.Status200OK)]
     public async Task<ActionResult<IReadOnlyList<MyStokvelResponse>>> GetMyStokvels(CancellationToken ct)
