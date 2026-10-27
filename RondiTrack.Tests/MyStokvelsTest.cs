@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using System.Text.Json;
 using RondiTrack.Domain;
 using RondiTrack.Tests.TestSupport;
@@ -6,7 +6,7 @@ using Xunit;
 
 namespace RondiTrack.Tests;
 
-// NEW 8.1: tests for GET /api/me, GET /api/me/stokvels and the new fields on GET /api/stokvels/{id}
+// NEW 8.1: tests for GET /api/v1/me, GET /api/v1/me/stokvels and the new fields on GET /api/v1/stokvels/{id}
 [Collection("Postgres collection")]
 public class MyStokvelsTests(PostgresApiFactory factory)
 {
@@ -52,7 +52,7 @@ public class MyStokvelsTests(PostgresApiFactory factory)
     {
         var (userId, email) = await CreateUserAsync();
 
-        var response = await factory.CreateClientFor(userId).GetAsync("/api/me");
+        var response = await factory.CreateClientFor(userId).GetAsync("/api/v1/me");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         using var doc = await ReadAsync(response);
@@ -63,7 +63,7 @@ public class MyStokvelsTests(PostgresApiFactory factory)
     [Fact]
     public async Task Me_Without_A_Token_Returns_401()
     {
-        var response = await factory.CreateAnonymousClient().GetAsync("/api/me");
+        var response = await factory.CreateAnonymousClient().GetAsync("/api/v1/me");
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
 
@@ -72,7 +72,7 @@ public class MyStokvelsTests(PostgresApiFactory factory)
     {
         var (userId, _) = await CreateUserAsync();
 
-        var response = await factory.CreateClientFor(userId).GetAsync("/api/me/stokvels");
+        var response = await factory.CreateClientFor(userId).GetAsync("/api/v1/me/stokvels");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);   // NOT 404, NOT 403
         using var doc = await ReadAsync(response);
@@ -90,7 +90,7 @@ public class MyStokvelsTests(PostgresApiFactory factory)
         await SeedStokvelAsync(nameB, (other, StokvelRole.Treasurer), (me, StokvelRole.Member));   // Member here
         await SeedStokvelAsync($"Not Mine {Guid.NewGuid():N}", (other, StokvelRole.Member));       // not mine
 
-        var response = await factory.CreateClientFor(me).GetAsync("/api/me/stokvels");
+        var response = await factory.CreateClientFor(me).GetAsync("/api/v1/me/stokvels");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         using var doc = await ReadAsync(response);
@@ -112,7 +112,7 @@ public class MyStokvelsTests(PostgresApiFactory factory)
             await db.SaveChangesAsync();
         }
 
-        var response = await factory.CreateClientFor(me).GetAsync("/api/me/stokvels");
+        var response = await factory.CreateClientFor(me).GetAsync("/api/v1/me/stokvels");
 
         using var doc = await ReadAsync(response);
         var item = doc.RootElement.EnumerateArray().Single();
@@ -133,7 +133,7 @@ public class MyStokvelsTests(PostgresApiFactory factory)
             await db.SaveChangesAsync();
         }
 
-        var response = await factory.CreateClientFor(me).GetAsync($"/api/stokvels/{stokvelId}");
+        var response = await factory.CreateClientFor(me).GetAsync($"/api/v1/stokvels/{stokvelId}");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         using var doc = await ReadAsync(response);

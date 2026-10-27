@@ -1,4 +1,4 @@
-using Microsoft.EntityFrameworkCore;
+﻿using Microsoft.EntityFrameworkCore;
 using RondiTrack.Data;
 using RondiTrack.Domain;
 using RondiTrack.Dtos;
@@ -68,7 +68,7 @@ public sealed class MyStokvelsService(RondiTrackDbContext db)
     }
 
     // For each stokvel: its newest OPEN cycle, how much was collected, and how much THIS user paid
-    private async Task<Dictionary<Guid, (CycleSummaryResponse Summary, decimal MyPaid)>> LoadCurrentCyclesAsync(
+    private async Task<Dictionary<Guid, (CurrentCycleSummaryResponse Summary, decimal MyPaid)>> LoadCurrentCyclesAsync(
         Dictionary<Guid, ContributionFrequency> frequencies, Guid? userId, CancellationToken ct)
     {
         var stokvelIds = frequencies.Keys.ToList();
@@ -83,7 +83,7 @@ public sealed class MyStokvelsService(RondiTrackDbContext db)
             .Select(g => g.OrderByDescending(c => c.CycleNumber).First())
             .ToList();
 
-        var result = new Dictionary<Guid, (CycleSummaryResponse, decimal)>();
+        var result = new Dictionary<Guid, (CurrentCycleSummaryResponse, decimal)>();
         if (latest.Count == 0) return result;
 
         var cycleIds = latest.Select(c => c.Id).ToList();
@@ -108,7 +108,7 @@ public sealed class MyStokvelsService(RondiTrackDbContext db)
             var mine = s?.Mine ?? 0m;
             var next = NextPayout(c.CreatedAtUtc, frequencies[c.StokvelId]);
             result[c.StokvelId] = (
-                new CycleSummaryResponse(c.Id, c.CycleNumber, c.TargetAmount, collected, c.CreatedAtUtc, next),
+                new CurrentCycleSummaryResponse(c.Id, c.CycleNumber, c.TargetAmount, collected, c.CreatedAtUtc, next),
                 mine);
         }
 
