@@ -165,6 +165,8 @@ builder.Services.AddScoped<IContributionQueries, ContributionQueries>();
 builder.Services.AddScoped<ContributionPagingService>();
 builder.Services.AddScoped<MemberPagingService>();
 builder.Services.AddScoped<MyStokvelsService>();   // NEW 8.1: "my stokvels" and the stokvel detail summary
+builder.Services.AddScoped<StokvelContributionPagingService>();   // NEW 8.3: contribution history of one stokvel
+builder.Services.AddScoped<ActivityFeedService>();                 // NEW 8.3: activity feed across my stokvels
 builder.Services.AddScoped<IStokvelMembershipService, StokvelMembershipService>();
 builder.Services.AddScoped<IContributionService, ContributionService>();
 builder.Services.AddScoped<IPayoutFaultHook, NoOpPayoutFaultHook>();

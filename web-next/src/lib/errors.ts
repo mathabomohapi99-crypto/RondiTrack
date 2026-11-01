@@ -21,3 +21,26 @@ export function correlationIdFrom(body: unknown): string | undefined {
   }
   return undefined;
 }
+
+// NEW 8.2: the "detail" sentence of a problem+json body (used for 409 and 422, where it explains why).
+export function detailFrom(body: unknown): string | undefined {
+  if (body && typeof body === 'object' && 'detail' in body) {
+    const d = (body as Record<string, unknown>).detail;
+    if (typeof d === 'string' && d) return d;
+  }
+  return undefined;
+}
+
+// NEW 8.2: the "errors" map of a 400, as { lowercasedField: firstMessage }.
+export function fieldErrorsFrom(body: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (body && typeof body === 'object' && 'errors' in body) {
+    const raw = (body as Record<string, unknown>).errors;
+    if (raw && typeof raw === 'object') {
+      for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+        if (Array.isArray(value) && value.length > 0) out[key.toLowerCase()] = String(value[0]);
+      }
+    }
+  }
+  return out;
+}

@@ -5,13 +5,37 @@ import { signIn, type SignInState } from './actions';
 
 const initialState: SignInState = {};
 
-export function LoginForm() {
+export function LoginForm({ next }: { next: string }) {
   const [state, formAction, pending] = useActionState(signIn, initialState);
 
   return (
     <form action={formAction} className="mt-4 space-y-3">
-      <input name="email" type="email" placeholder="Email" required className="w-full rounded border p-2" />
-      <input name="password" type="password" placeholder="Password" required className="w-full rounded border p-2" />
+      {/* where to go after signing in (checked again on the server) */}
+      <input type="hidden" name="next" value={next} />
+      <div>
+        <label htmlFor="email" className="block text-sm">Email</label>
+        {/* autoComplete="username" so a password manager recognises the form. Paste is never blocked. */}
+        <input
+          id="email"
+          name="email"
+          type="email"
+          autoComplete="username"
+          required
+          defaultValue={state.email ?? ''}
+          className="w-full rounded border p-2"
+        />
+      </div>
+      <div>
+        <label htmlFor="password" className="block text-sm">Password</label>
+        <input
+          id="password"
+          name="password"
+          type="password"
+          autoComplete="current-password"
+          required
+          className="w-full rounded border p-2"
+        />
+      </div>
       <button type="submit" disabled={pending} className="w-full rounded bg-black p-2 text-white disabled:opacity-50">
         {pending ? 'Signing in…' : 'Sign in'}
       </button>

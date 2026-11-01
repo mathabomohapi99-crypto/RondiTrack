@@ -1,0 +1,1671 @@
+----- FILE: API\Program.cs -----
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using FluentValidation;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
+using Microsoft.IdentityModel.Tokens;
+using OpenTelemetry.Logs;
+using OpenTelemetry.Metrics;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
+using RondiTrack.Auth;
+using RondiTrack.Data;
+using RondiTrack.Errors;
+using RondiTrack.Jobs;                                 // 6.4
+using RondiTrack.Services;
+using RondiTrack.Telemetry;
+using RondiTrack.Validation;
+using RondiTrack.Web;
+using Scalar.AspNetCore;
+
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services
+    .AddControllers(o => o.Filters.Add<ValidationFilter>())
+    .AddJsonOptions(o =>
+    {
+        o.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter());
+        o.JsonSerializerOptions.NumberHandling = JsonNumberHandling.Strict;   // 6.3
+    })
+    .ConfigureApiBehaviorOptions(o =>
+    {
+        // 6.3: bad JSON becomes the same problem+json shape, with no internal type names
+        o.InvalidModelStateResponseFactory = ctx =>
+        {
+            var errors = ctx.ModelState
+                .Where(kv => kv.Value?.Errors.Count > 0)
+                .ToDictionary(
+                    kv => JsonNamingPolicy.CamelCase.ConvertName(kv.Key.TrimStart('$', '.')),
+                    kv => kv.Value!.Errors
+                        .Select(e => e.Exception is null && !string.IsNullOrWhiteSpace(e.ErrorMessage)
+                            ? e.ErrorMessage : "The value is not valid.")
+                        .ToArray());
+
+            var problem = new ProblemDetails { Status = 400, Title = "Validation Failed", Detail = "One or more fields are invalid." };
+            problem.Extensions["errors"] = errors;
+            problem.Extensions["correlationId"] = CorrelationId.For(ctx.HttpContext);
+            return new ObjectResult(problem) { StatusCode = 400, ContentTypes = { "application/problem+json" } };
+        };
+    });
+
+builder.Services.ConfigureHttpJsonOptions(o =>
+{
+    o.SerializerOptions.NumberHandling = JsonNumberHandling.Strict;                  // 6.3
+    o.SerializerOptions.Converters.Add(new JsonStringEnumConverter());               // 6.3: OpenAPI shows enums as names (TypeScript gets "Treasurer", not 1)
+});
+
+builder.Services.AddOpenApi();
+
+builder.Services.AddProblemDetails(o =>
+    o.CustomizeProblemDetails = ctx =>
+        ctx.ProblemDetails.Extensions["correlationId"] = CorrelationId.For(ctx.HttpContext));
+
+builder.Services.AddExceptionHandler<RondiExceptionHandler>();
+builder.Services.AddValidatorsFromAssemblyContaining<Program>();
+
+builder.Services.AddFrontendCors();        // 6.3
+builder.Services.AddRondiRateLimiting();   // 6.3
+
+// ---------- OpenTelemetry (6.2) ----------
+var otlpEnabled = !string.IsNullOrWhiteSpace(builder.Configuration["OTEL_EXPORTER_OTLP_ENDPOINT"]);
+var resource = ResourceBuilder.CreateDefault().AddService(RondiTelemetry.ServiceName);
+
+builder.Services.AddOpenTelemetry()
+    .ConfigureResource(r => r.AddService(RondiTelemetry.ServiceName))
+    .WithTracing(t =>
+    {
+        t.AddSource(RondiTelemetry.ActivitySourceName);   // 6.4: the job spans use this same source
+        t.AddAspNetCoreInstrumentation(o => o.Filter = ctx => !ctx.Request.Path.StartsWithSegments("/health"));
+        t.AddSource("Npgsql");
+        if (otlpEnabled) t.AddOtlpExporter();
+    })
+    .WithMetrics(m =>
+    {
+        m.AddMeter(RondiTelemetry.MeterName);             // 6.4: the cycle/arrears counters use this meter
+        m.AddAspNetCoreInstrumentation();
+        if (otlpEnabled) m.AddOtlpExporter();
+    });
+
+if (otlpEnabled)
+{
+    builder.Logging.AddOpenTelemetry(o =>
+    {
+        o.SetResourceBuilder(resource);
+        o.IncludeFormattedMessage = true;
+        o.AddOtlpExporter();
+    });
+}
+
+// 6.4: FAIL FAST. A missing setting stops the container at startup with a message that names it.
+var connectionString = builder.Configuration.GetConnectionString("RondiTrack")
+    ?? throw new InvalidOperationException("Set ConnectionStrings:RondiTrack (user-secrets or ConnectionStrings__RondiTrack).");
+
+var jwt = builder.Configuration.GetSection("Jwt").Get<JwtOptions>() ?? new JwtOptions();
+if (string.IsNullOrWhiteSpace(jwt.SigningKey) || Encoding.UTF8.GetByteCount(jwt.SigningKey) < 32)
+    throw new InvalidOperationException("Jwt:SigningKey is missing or shorter than 32 bytes (set Jwt__SigningKey).");
+if (jwt.AccessTokenMinutes is < 1 or > 15)
+    throw new InvalidOperationException("Jwt:AccessTokenMinutes must be between 1 and 15.");
+
+builder.Services.AddDbContext<RondiTrackDbContext>(o =>
+    o.UseNpgsql(connectionString, n => n.EnableRetryOnFailure(4, TimeSpan.FromSeconds(10), null)));
+
+builder.Services.AddSingleton(jwt);
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(o =>
+    {
+        o.MapInboundClaims = false;
+        o.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuerSigningKey = true,
+            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwt.SigningKey)),
+            ValidAlgorithms = [SecurityAlgorithms.HmacSha256],
+            ValidateIssuer = true, ValidIssuer = jwt.Issuer,
+            ValidateAudience = true, ValidAudience = jwt.Audience,
+            ValidateLifetime = true, RequireExpirationTime = true,
+            ClockSkew = TimeSpan.FromSeconds(30),
+            NameClaimType = "sub", RoleClaimType = "role"
+        };
+    });
+
+builder.Services.AddAuthorization(o =>
+{
+    o.FallbackPolicy = new AuthorizationPolicyBuilder().RequireAuthenticatedUser().Build();
+    o.AddPolicy(Policies.StokvelMember, p => p.RequireAuthenticatedUser().AddRequirements(new StokvelAccessRequirement(StokvelAccessLevel.Member)));
+    o.AddPolicy(Policies.StokvelOfficer, p => p.RequireAuthenticatedUser().AddRequirements(new StokvelAccessRequirement(StokvelAccessLevel.Officer)));
+    o.AddPolicy(Policies.RecordContribution, p => p.RequireAuthenticatedUser().AddRequirements(new StokvelAccessRequirement(StokvelAccessLevel.RecordContribution)));
+    o.AddPolicy(Policies.UserSelf, p => p.RequireAuthenticatedUser().AddRequirements(new UserSelfRequirement()));
+    o.AddPolicy(Policies.PlatformAdmin, p => p.RequireClaim("role", AuthConstants.PlatformAdminRole));
+});
+
+builder.Services.AddScoped<IAuthorizationHandler, StokvelAccessHandler>();
+builder.Services.AddSingleton<IAuthorizationHandler, UserSelfHandler>();
+builder.Services.AddSingleton<IAuthorizationMiddlewareResultHandler, ProblemAuthorizationResultHandler>();
+builder.Services.AddScoped<IStokvelAccess, StokvelAccess>();
+
+builder.Services.AddSingleton<IPasswordHasher<User>, PasswordHasher<User>>();
+builder.Services.AddSingleton<ITokenService, TokenService>();
+builder.Services.AddScoped<IRefreshTokenRepository, EfRefreshTokenRepository>();
+builder.Services.AddScoped<IAuthService, AuthService>();
+
+builder.Services.AddSingleton(TimeProvider.System);   // tests swap this for FakeTimeProvider
+builder.Services.AddSingleton<IIdempotencyStore, InMemoryIdempotencyStore>();   // TEMP 7.1: EfIdempotencyStore file is missing, restore later   // 6.4: was Singleton in-memory. Now in PostgreSQL (Scoped, it uses the DbContext)
+
+builder.Services.AddScoped<IUserRepository, EfUserRepository>();
+builder.Services.AddScoped<IStokvelRepository, EfStokvelRepository>();
+builder.Services.AddScoped<IContributionCycleRepository, EfContributionCycleRepository>();
+builder.Services.AddScoped<IContributionRepository, EfContributionRepository>();
+builder.Services.AddScoped<IStokvelMemberRepository, EfStokvelMemberRepository>();
+builder.Services.AddScoped<IContributionQueries, ContributionQueries>();
+builder.Services.AddScoped<ContributionPagingService>();
+builder.Services.AddScoped<MemberPagingService>();
+builder.Services.AddScoped<MyStokvelsService>();   // NEW 8.1: "my stokvels" and the stokvel detail summary
+builder.Services.AddScoped<IStokvelMembershipService, StokvelMembershipService>();
+builder.Services.AddScoped<IContributionService, ContributionService>();
+builder.Services.AddScoped<IPayoutFaultHook, NoOpPayoutFaultHook>();
+builder.Services.AddScoped<IPayoutService, PayoutService>();
+builder.Services.AddScoped<IHomeService, HomeService>();
+builder.Services.AddScoped<ICycleSummaryService, CycleSummaryService>();   // 7.2
+
+// ---------- Background jobs (6.4) ----------
+builder.Services.Configure<CycleCloseOptions>(builder.Configuration.GetSection("Jobs:CycleClose"));      // 6.4
+builder.Services.Configure<HousekeepingOptions>(builder.Configuration.GetSection("Jobs:Housekeeping"));  // 6.4
+builder.Services.AddSingleton<CycleCloseJob>();                                                          // 6.4: also a singleton so tests can call RunOnceAsync
+builder.Services.AddHostedService(sp => sp.GetRequiredService<CycleCloseJob>());                         // 6.4
+builder.Services.AddSingleton<HousekeepingJob>();                                                        // 6.4
+builder.Services.AddHostedService(sp => sp.GetRequiredService<HousekeepingJob>());                       // 6.4
+
+builder.Services.AddHealthChecks()
+    .AddDbContextCheck<RondiTrackDbContext>("postgres", failureStatus: HealthStatus.Unhealthy, tags: ["ready"]);
+
+var readyTimeoutSeconds = builder.Configuration.GetValue("Health:ReadyTimeoutSeconds", 2);
+if (readyTimeoutSeconds > 0)
+{
+    builder.Services.Configure<HealthCheckServiceOptions>(o =>
+    {
+        foreach (var check in o.Registrations)
+            check.Timeout = TimeSpan.FromSeconds(readyTimeoutSeconds);
+    });
+}
+
+var app = builder.Build();
+
+// 6.4: one-shot migration mode (used by the "migrate" service in compose). Runs and exits; the jobs never start.
+if (args.Contains("--migrate"))
+{
+    using var migrateScope = app.Services.CreateScope();
+    await migrateScope.ServiceProvider.GetRequiredService<RondiTrackDbContext>().Database.MigrateAsync();
+    Console.WriteLine("Migrations applied.");
+    return;
+}
+
+if (args.Contains("--seed-volume"))
+{
+    using var volumeScope = app.Services.CreateScope();
+    var volumeDb = volumeScope.ServiceProvider.GetRequiredService<RondiTrackDbContext>();
+    await volumeDb.Database.MigrateAsync();
+    await VolumeSeeder.RunAsync(volumeDb);
+    return;
+}
+
+// 6.4: Demo:Enabled=true (compose sets it) gives Scalar, OpenAPI and demo accounts without running as "Development"
+var demoEnabled = app.Configuration.GetValue<bool>("Demo:Enabled");
+
+if (app.Environment.IsDevelopment() || demoEnabled)
+{
+    using var scope = app.Services.CreateScope();
+    var db = scope.ServiceProvider.GetRequiredService<RondiTrackDbContext>();
+    await SeedData.EnsureSeededAsync(db);
+
+    if (demoEnabled)   // 6.4
+    {
+        var demoPassword = app.Configuration["Demo:Password"];
+        if (string.IsNullOrWhiteSpace(demoPassword) || demoPassword.Length < 12)
+            throw new InvalidOperationException("Demo:Enabled needs Demo:Password, at least 12 characters (set Demo__Password).");
+        await DemoSeed.RunAsync(db, scope.ServiceProvider.GetRequiredService<IPasswordHasher<User>>(),
+            scope.ServiceProvider.GetRequiredService<TimeProvider>(), demoPassword);
+    }
+}
+
+// ---------- PIPELINE ORDER (6.3) ----------
+app.UseExceptionHandler();
+
+if (app.Environment.IsDevelopment() || demoEnabled)   // 6.4
+{
+    app.MapOpenApi().AllowAnonymous();
+    app.MapScalarApiReference().AllowAnonymous();
+}
+
+app.UseHttpsRedirection();
+app.UseRouting();
+app.UseCors(CorsPolicies.Frontend);   // 1. CORS first
+app.UseAuthentication();              // 2. who are you?
+app.UseRateLimiter();                 // 3. per-user limits need "sub"; before idempotency so a 429 never stores a key
+app.UseAuthorization();               // 4. what may you do?
+app.MapControllers();                 // 5. idempotency runs inside the contribution service
+
+app.MapHealthChecks("/health/live", new HealthCheckOptions { Predicate = _ => false }).AllowAnonymous();
+app.MapHealthChecks("/health/ready", new HealthCheckOptions { Predicate = r => r.Tags.Contains("ready") }).AllowAnonymous();
+
+app.Run();
+
+public partial class Program;
+
+----- FILE: API\appsettings.json -----
+{
+    "Logging":  {
+                    "LogLevel":  {
+                                     "Default":  "Information",
+                                     "Microsoft.AspNetCore":  "Warning",
+                                     "Microsoft.EntityFrameworkCore.Database.Command":  "Warning",
+                                     "Microsoft.AspNetCore.Diagnostics.ExceptionHandlerMiddleware":  "None"
+                                 }
+                },
+    "AllowedHosts":  "*",
+    "Jwt":  {
+                "Issuer":  "RondiTrack",
+                "Audience":  "RondiTrack.Api",
+                "AccessTokenMinutes":  10,
+                "RefreshTokenDays":  7
+            },
+    "Cors":  {
+                 "AllowedOrigins":  [
+
+                                    ]
+             },
+    "RateLimiting":  {
+                         "Login":  {
+                                       "PermitLimit":  5,
+                                       "WindowSeconds":  60
+                                   },
+                         "Contribution":  {
+                                              "TokenLimit":  30,
+                                              "TokensPerPeriod":  5,
+                                              "ReplenishSeconds":  60
+                                          },
+                         "Payout":  {
+                                        "TokenLimit":  10,
+                                        "TokensPerPeriod":  2,
+                                        "ReplenishSeconds":  60
+                                    }
+                     }
+}
+
+----- FILE: API\RondiTrack.http -----
+@RondiTrack_HostAddress = http://localhost:5134
+
+GET {{RondiTrack_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
+
+----- FILE: API\Auth\AuthService.cs -----
+using Microsoft.AspNetCore.Identity;
+using RondiTrack.Dtos;
+
+namespace RondiTrack.Auth;
+
+// What the controller needs after login or refresh
+public sealed record AuthResult(
+    string AccessToken,
+    DateTime AccessTokenExpiresAtUtc,
+    string RefreshToken,              // goes ONLY into the cookie
+    DateTime RefreshTokenExpiresAtUtc,
+    Guid RefreshTokenId);
+
+public interface IAuthService
+{
+    Task<User> RegisterAsync(RegisterRequest request);
+    Task<AuthResult> LoginAsync(LoginRequest request);
+    Task<AuthResult> RefreshAsync(string? rawRefreshToken);
+    Task LogoutAsync(string? rawRefreshToken);
+}
+
+public sealed class AuthService(
+    IUserRepository users,
+    IRefreshTokenRepository tokens,
+    IPasswordHasher<User> hasher,
+    ITokenService tokenService,
+    JwtOptions jwt,
+    ILogger<AuthService> logger) : IAuthService
+{
+    // A fake user and hash. Used when the email is unknown, so the time taken looks the same as a wrong password.
+    private static readonly User DummyUser = new("Dummy", "dummy@example.com");
+    private static readonly string DummyHash =
+        new PasswordHasher<User>().HashPassword(DummyUser, "dummy-password-never-used");
+
+    public async Task<User> RegisterAsync(RegisterRequest request)
+    {
+        var user = new User(request.FullName, request.Email);   // trims + lower-cases the email
+
+        if (await users.EmailExistsAsync(user.Email))
+            throw new DomainConflictException("An account with this email already exists.");   // 409
+
+        user.SetPasswordHash(hasher.HashPassword(user, request.Password));   // store the hash only
+        await users.AddAsync(user);   // the unique index also catches two requests at the same moment
+
+        logger.LogInformation("User {UserId} registered", user.Id);   // id only, never email or password
+        return user;
+    }
+
+    public async Task<AuthResult> LoginAsync(LoginRequest request)
+    {
+        var user = await users.GetByEmailAsync(request.Email);
+
+        // always run one password check (real or fake hash) so unknown email and wrong password look alike
+        var hash = user?.PasswordHash ?? DummyHash;
+        var outcome = hasher.VerifyHashedPassword(user ?? DummyUser, hash, request.Password);
+
+        if (user is null || user.PasswordHash is null || outcome == PasswordVerificationResult.Failed)
+        {
+            // CHANGED 6.2: never the typed email. Our own user id when the account exists, so a guessing attack on one account is visible.
+            if (user is null)
+                logger.LogWarning("Login failed: no matching account");
+            else
+                logger.LogWarning("Login failed for user {UserId}", user.Id);
+            throw new InvalidCredentialsException();   // same 401 message for both cases
+        }
+
+        var result = await IssueAsync(user, Guid.NewGuid());   // new login = new token family
+        logger.LogInformation("Login succeeded for user {UserId}", user.Id);
+        return result;
+    }
+
+    public async Task<AuthResult> RefreshAsync(string? rawRefreshToken)
+    {
+        if (string.IsNullOrWhiteSpace(rawRefreshToken))
+            throw new InvalidRefreshTokenException();
+
+        var now = DateTime.UtcNow;
+        var stored = await tokens.GetByHashAsync(tokenService.HashRefreshToken(rawRefreshToken))
+            ?? throw new InvalidRefreshTokenException();
+
+        // REUSE DETECTION: this token was already used (or revoked) -> someone replayed it
+        if (stored.UsedAtUtc.HasValue || stored.RevokedAtUtc.HasValue)
+        {
+            await tokens.RevokeFamilyAsync(stored.FamilyId, now);   // kill every token of this login
+            logger.LogWarning("Refresh token reuse detected for user {UserId}. Session {FamilyId} revoked",
+                stored.UserId, stored.FamilyId);
+            throw new InvalidRefreshTokenException();
+        }
+
+        if (stored.ExpiresAtUtc <= now)
+            throw new InvalidRefreshTokenException();
+
+        // read the user again, so the new access token reflects their CURRENT platform flag
+        var user = await users.GetByIdAsync(stored.UserId)
+            ?? throw new InvalidRefreshTokenException();
+
+        var result = await IssueAsync(user, stored.FamilyId);   // ROTATION: new token, same family
+
+        // mark the old one used. If another request got there first, this is a replay.
+        if (!await tokens.TryMarkUsedAsync(stored.Id, result.RefreshTokenId, now))
+        {
+            await tokens.RevokeFamilyAsync(stored.FamilyId, now);
+            logger.LogWarning("Refresh token reuse detected for user {UserId}. Session {FamilyId} revoked",
+                stored.UserId, stored.FamilyId);
+            throw new InvalidRefreshTokenException();
+        }
+
+        logger.LogInformation("Refresh token rotated for user {UserId}", user.Id);
+        return result;
+    }
+
+    // Idempotent: unknown or missing token is fine, it just does nothing
+    public async Task LogoutAsync(string? rawRefreshToken)
+    {
+        if (string.IsNullOrWhiteSpace(rawRefreshToken)) return;
+
+        var stored = await tokens.GetByHashAsync(tokenService.HashRefreshToken(rawRefreshToken));
+        if (stored is null) return;
+
+        await tokens.RevokeFamilyAsync(stored.FamilyId, DateTime.UtcNow);
+        logger.LogInformation("User {UserId} logged out", stored.UserId);
+    }
+
+    // Makes the access token + a new refresh token (stored as a hash) for one family
+    private async Task<AuthResult> IssueAsync(User user, Guid familyId)
+    {
+        var now = DateTime.UtcNow;
+        var access = tokenService.CreateAccessToken(user.Id, user.IsPlatformAdmin);
+        var (raw, hash) = tokenService.CreateRefreshToken();
+
+        var refresh = new RefreshToken(user.Id, familyId, hash, now, now.AddDays(jwt.RefreshTokenDays));
+        await tokens.AddAsync(refresh);
+
+        return new AuthResult(access.Value, access.ExpiresAtUtc, raw, refresh.ExpiresAtUtc, refresh.Id);
+    }
+}
+----- FILE: API\Auth\TokenService.cs -----
+using System.Security.Claims;
+using System.Security.Cryptography;
+using System.Text;
+using Microsoft.AspNetCore.WebUtilities;
+using Microsoft.IdentityModel.JsonWebTokens;
+using Microsoft.IdentityModel.Tokens;
+
+namespace RondiTrack.Auth;
+
+public sealed record AccessToken(string Value, DateTime ExpiresAtUtc);
+
+public interface ITokenService
+{
+    AccessToken CreateAccessToken(Guid userId, bool isPlatformAdmin);
+    (string Raw, string Hash) CreateRefreshToken();
+    string HashRefreshToken(string raw);
+}
+
+public sealed class TokenService(JwtOptions options) : ITokenService
+{
+    // the signing key as bytes (HS256 needs at least 32)
+    private readonly SymmetricSecurityKey _key = new(Encoding.UTF8.GetBytes(options.SigningKey));
+
+    public AccessToken CreateAccessToken(Guid userId, bool isPlatformAdmin)
+    {
+        var now = DateTime.UtcNow;
+        var expires = now.AddMinutes(options.AccessTokenMinutes);
+
+        // Only facts that can safely be stale for a few minutes. NO stokvel roles here.
+        var claims = new List<Claim>
+        {
+            new("sub", userId.ToString()),          // who the user is (never changes)
+            new("jti", Guid.NewGuid().ToString())   // unique id of this token
+        };
+        if (isPlatformAdmin)
+            claims.Add(new Claim("role", AuthConstants.PlatformAdminRole));   // platform-level only
+
+        var descriptor = new SecurityTokenDescriptor
+        {
+            Issuer = options.Issuer,
+            Audience = options.Audience,
+            Subject = new ClaimsIdentity(claims),
+            IssuedAt = now,
+            NotBefore = now,
+            Expires = expires,
+            SigningCredentials = new SigningCredentials(_key, SecurityAlgorithms.HmacSha256)
+        };
+
+        return new AccessToken(new JsonWebTokenHandler().CreateToken(descriptor), expires);
+    }
+
+    // Random bytes, NOT a JWT. The raw value goes to the client; only its hash is stored.
+    public (string Raw, string Hash) CreateRefreshToken()
+    {
+        var raw = WebEncoders.Base64UrlEncode(RandomNumberGenerator.GetBytes(32));
+        return (raw, HashRefreshToken(raw));
+    }
+
+    // SHA-256 is enough here because the token is 256 bits of randomness (not a guessable password)
+    public string HashRefreshToken(string raw) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(raw)));
+}
+----- FILE: API\Auth\AuthExceptions.cs -----
+namespace RondiTrack.Auth;
+
+// Same message for unknown email AND wrong password, so nobody can learn which emails have accounts
+public sealed class InvalidCredentialsException() : Exception("Invalid email or password.");
+
+// Used for a missing, unknown, used, revoked or expired refresh token
+public sealed class InvalidRefreshTokenException() : Exception("The refresh token is invalid or has expired.");
+
+// Becomes a 403 problem response
+public sealed class ForbiddenException(string message) : Exception(message);
+----- FILE: API\Auth\AuthConstants.cs -----
+using RondiTrack.Common;
+namespace RondiTrack.Auth;
+
+public static class AuthConstants
+{
+    public const string PlatformAdminRole = "PlatformAdmin";   // the ONLY role in the token (platform level)
+    public const string RefreshCookieName = "rondi_refresh";   // name of the refresh cookie
+    public const string RefreshCookiePath = ApiRoutes.V1Prefix + "/auth";       // cookie is only sent to the auth endpoints
+}
+
+// Policy names live here, so controllers never contain role strings
+public static class Policies
+{
+    public const string StokvelMember = "StokvelMember";           // any member of the stokvel
+    public const string StokvelOfficer = "StokvelOfficer";         // Treasurer or Admin of the stokvel
+    public const string RecordContribution = "RecordContribution"; // own contribution, or officer for others
+    public const string UserSelf = "UserSelf";                     // your own account (or platform admin)
+    public const string PlatformAdmin = "PlatformAdmin";           // platform admin claim
+}
+----- FILE: API\Auth\JwtOptions.cs -----
+namespace RondiTrack.Auth;
+
+// Settings for tokens. Everything except SigningKey comes from appsettings.json.
+public sealed class JwtOptions
+{
+    public string Issuer { get; set; } = "RondiTrack";
+    public string Audience { get; set; } = "RondiTrack.Api";
+    public string SigningKey { get; set; } = "";      // comes ONLY from user-secrets (never appsettings)
+    public int AccessTokenMinutes { get; set; } = 10; // short on purpose
+    public int RefreshTokenDays { get; set; } = 7;
+}
+----- FILE: API\Auth\StokvelAccess.cs -----
+using System.Security.Claims;
+using Microsoft.AspNetCore.Authorization;
+using RondiTrack.Telemetry;
+
+namespace RondiTrack.Auth;
+
+public interface IStokvelAccess
+{
+    Task EnsureAsync(ClaimsPrincipal user, Guid stokvelId, string policy, Guid? onBehalfOfUserId = null);
+}
+
+// One place that decides 404 vs 403. No try/catch, no role names.
+public sealed class StokvelAccess(IAuthorizationService authorization, ILogger<StokvelAccess> logger) : IStokvelAccess   // NEW 6.2: logger
+{
+    public async Task EnsureAsync(ClaimsPrincipal user, Guid stokvelId, string policy, Guid? onBehalfOfUserId = null)
+    {
+        var result = await authorization.AuthorizeAsync(user, new StokvelResource(stokvelId, onBehalfOfUserId), policy);
+        if (result.Succeeded) return;
+
+        var notMember = result.Failure?.FailureReasons
+            .Any(r => r.Message == StokvelAccessHandler.NotMemberReason) ?? false;
+
+        // not a member: pretend the stokvel does not exist (same text as the real 404)
+        if (notMember)
+        {
+            RondiMetrics.AuthorizationRefused(RefusalResults.NotFound);   // NEW 6.2: count it
+            // NEW 6.2: Information. A refusal is an expected answer; a spike is caught by the metric. Our user id only.
+            logger.LogInformation("Stokvel access refused ({Result}) for user {UserId}",
+                RefusalResults.NotFound, user.GetUserId());
+            throw new DomainNotFoundException($"Stokvel {stokvelId} was not found.");
+        }
+
+        // a member without the role already knows the stokvel exists
+        RondiMetrics.AuthorizationRefused(RefusalResults.Forbidden);      // NEW 6.2: count it
+        logger.LogInformation("Stokvel access refused ({Result}) for user {UserId}",
+            RefusalResults.Forbidden, user.GetUserId());
+        throw new ForbiddenException("You do not have the required role in this stokvel.");
+    }
+}
+----- FILE: API\Auth\StokvelAuthorization.cs -----
+using Microsoft.AspNetCore.Authorization;
+
+namespace RondiTrack.Auth;
+
+// What level of access the endpoint needs
+public enum StokvelAccessLevel
+{
+    Member,              // any member
+    Officer,             // Treasurer or Admin of THAT stokvel
+    RecordContribution   // own contribution, or officer for someone else's
+}
+
+// The custom requirement
+public sealed record StokvelAccessRequirement(StokvelAccessLevel Level) : IAuthorizationRequirement;
+
+// The resource being protected: one stokvel (and optionally who the action is for)
+public sealed record StokvelResource(Guid StokvelId, Guid? OnBehalfOfUserId = null);
+
+// Resource-based handler. It asks the DATABASE every time, so a removed or demoted member is refused at once.
+public sealed class StokvelAccessHandler(IStokvelMemberRepository members)
+    : AuthorizationHandler<StokvelAccessRequirement, StokvelResource>
+{
+    public const string NotMemberReason = "not-a-member";     // becomes 404
+    public const string MissingRoleReason = "missing-role";   // becomes 403
+
+    protected override async Task HandleRequirementAsync(
+        AuthorizationHandlerContext context, StokvelAccessRequirement requirement, StokvelResource resource)
+    {
+        // platform admins (support staff) pass on every stokvel
+        if (context.User.IsPlatformAdmin())
+        {
+            context.Succeed(requirement);
+            return;
+        }
+
+        var callerId = context.User.GetUserId();
+        if (callerId is null) return;   // not signed in: no success
+
+        // the real check: the caller's membership row for THIS stokvel
+        var membership = await members.GetAsync(callerId.Value, resource.StokvelId);
+        if (membership is null)
+        {
+            context.Fail(new AuthorizationFailureReason(this, NotMemberReason));
+            return;
+        }
+
+        var isOfficer = membership.Role is StokvelRole.Treasurer or StokvelRole.Admin;
+
+        var needsOfficer = requirement.Level switch
+        {
+            StokvelAccessLevel.Officer => true,
+            // recording for yourself is fine; for someone else you must be an officer
+            StokvelAccessLevel.RecordContribution =>
+                resource.OnBehalfOfUserId is Guid target && target != callerId.Value,
+            _ => false
+        };
+
+        if (needsOfficer && !isOfficer)
+        {
+            context.Fail(new AuthorizationFailureReason(this, MissingRoleReason));
+            return;
+        }
+
+        context.Succeed(requirement);
+    }
+}
+----- FILE: API\Auth\UserClaimsExtensions.cs -----
+using System.Security.Claims;
+
+namespace RondiTrack.Auth;
+
+public static class UserClaimsExtensions
+{
+    // the signed-in user's id from the "sub" claim (null if there is none)
+    public static Guid? GetUserId(this ClaimsPrincipal user) =>
+        Guid.TryParse(user.FindFirstValue("sub"), out var id) ? id : null;
+
+    // platform admin = has the platform role claim
+    public static bool IsPlatformAdmin(this ClaimsPrincipal user) =>
+        user.HasClaim("role", AuthConstants.PlatformAdminRole);
+}
+----- FILE: API\Controllers\AuthController.cs -----
+using Microsoft.AspNetCore.RateLimiting;
+using RondiTrack.Web;
+using RondiTrack.Common;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using RondiTrack.Auth;
+using RondiTrack.Dtos;
+
+namespace RondiTrack.Controllers;
+
+[Route($"{ApiRoutes.V1}/auth")]
+[AllowAnonymous]   // all four endpoints work without an access token
+public class AuthController(IAuthService auth) : RondiControllerBase
+{
+    /// <summary>Registers a new account. Password must be at least 12 characters.</summary>
+    [HttpPost("register")]
+    [ProducesResponseType(typeof(UserResponse), StatusCodes.Status201Created)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status409Conflict)]
+    public async Task<ActionResult<UserResponse>> Register(RegisterRequest request)
+    {
+        var user = await auth.RegisterAsync(request);
+        return Created($"{ApiRoutes.V1Prefix}/users/{user.Id}", user.ToResponse());
+    }
+
+    /// <summary>Signs in. Returns the access token in the body and sets the refresh token as a cookie.</summary>
+    [HttpPost("login")]
+    [EnableRateLimiting(RateLimitPolicies.Login)]
+    [ProducesResponseType(typeof(AuthResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status401Unauthorized)]
+    public async Task<ActionResult<AuthResponse>> Login(LoginRequest request) =>
+        TokenResponse(await auth.LoginAsync(request));
+
+    /// <summary>Swaps the refresh cookie for a new access token and a new refresh cookie (rotation).</summary>
+    [HttpPost("refresh")]
+    [ProducesResponseType(typeof(AuthResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status401Unauthorized)]
+    public async Task<ActionResult<AuthResponse>> Refresh()
+    {
+        Request.Cookies.TryGetValue(AuthConstants.RefreshCookieName, out var raw);   // cookie is the only source
+        return TokenResponse(await auth.RefreshAsync(raw));
+    }
+
+    /// <summary>Signs out: revokes the session's refresh tokens. Safe to call more than once.</summary>
+    [HttpPost("logout")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    public async Task<IActionResult> Logout()
+    {
+        Request.Cookies.TryGetValue(AuthConstants.RefreshCookieName, out var raw);
+        await auth.LogoutAsync(raw);   // does nothing if there is no valid cookie
+        Response.Cookies.Delete(AuthConstants.RefreshCookieName, CookieOptionsFor(null));   // same path as when it was set
+        return NoContent();
+    }
+
+    // Sets the refresh cookie and returns ONLY the access token in the body
+    private ActionResult<AuthResponse> TokenResponse(AuthResult result)
+    {
+        Response.Cookies.Append(AuthConstants.RefreshCookieName, result.RefreshToken,
+            CookieOptionsFor(result.RefreshTokenExpiresAtUtc));
+        Response.Headers.CacheControl = "no-store";   // tokens must never be cached
+        return Ok(new AuthResponse(result.AccessToken, result.AccessTokenExpiresAtUtc, "Bearer"));
+    }
+
+    // The cookie flags (each one is justified in the README)
+    private static CookieOptions CookieOptionsFor(DateTime? expiresUtc) => new()
+    {
+        HttpOnly = true,                              // JavaScript cannot read it, so XSS cannot steal it
+        Secure = true,                                // only sent over HTTPS
+        SameSite = SameSiteMode.Strict,               // never sent on cross-site requests (CSRF)
+        Path = AuthConstants.RefreshCookiePath,       // only sent to /api/auth/*
+        IsEssential = true,                           // not blocked by consent middleware
+        Expires = expiresUtc.HasValue ? new DateTimeOffset(expiresUtc.Value) : null   // lives as long as the token
+    };
+}
+----- FILE: API\Dtos\AuthDtos.cs -----
+namespace RondiTrack.Dtos;
+
+public sealed record RegisterRequest(string FullName, string Email, string Password);
+
+public sealed record LoginRequest(string Email, string Password);
+
+// The refresh token is NOT here on purpose: it only travels in a cookie
+public sealed record AuthResponse(string AccessToken, DateTime ExpiresAtUtc, string TokenType);
+----- FILE: API\Validators\AuthRequestValidators.cs -----
+using FluentValidation;
+using RondiTrack.Dtos;
+
+namespace RondiTrack.Validators;
+
+public sealed class RegisterRequestValidator : AbstractValidator<RegisterRequest>
+{
+    public RegisterRequestValidator()
+    {
+        RuleFor(x => x.FullName).NotEmpty().MaximumLength(100);
+        RuleFor(x => x.Email).NotEmpty().EmailAddress().MaximumLength(320);
+        RuleFor(x => x.Password)
+            .NotEmpty()
+            .MinimumLength(12).WithMessage("Password must be at least 12 characters.")        // required rule
+            .MaximumLength(128).WithMessage("Password cannot be longer than 128 characters.");  // stops huge inputs being hashed
+    }
+}
+
+// Login only checks the fields are present. It never explains password rules.
+public sealed class LoginRequestValidator : AbstractValidator<LoginRequest>
+{
+    public LoginRequestValidator()
+    {
+        RuleFor(x => x.Email).NotEmpty();
+        RuleFor(x => x.Password).NotEmpty();
+    }
+}
+----- FILE: API\Common\ApiRoutes.cs -----
+namespace RondiTrack.Common;
+
+public static class ApiRoutes
+{
+    public const string V1 = "api/v1";
+    public const string V1Prefix = "/" + V1;   // for cookie paths
+}
+----- FILE: API\Errors\RondiExceptionHandler.cs -----
+using FluentValidation;
+using Microsoft.AspNetCore.Diagnostics;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using Npgsql;
+using RondiTrack.Api.Common.Paging;
+using RondiTrack.Auth;
+using RondiTrack.Common;
+using RondiTrack.Domain;
+using RondiTrack.Telemetry;
+using RondiTrack.Web;
+using System.Text.Json;
+
+namespace RondiTrack.Errors;
+
+public sealed class RondiExceptionHandler(ILogger<RondiExceptionHandler> logger) : IExceptionHandler
+{
+    public async ValueTask<bool> TryHandleAsync(HttpContext httpContext, Exception exception, CancellationToken cancellationToken)
+    {
+        // UseExceptionHandler wipes response headers (including CORS), so put them back
+        await CorsSetup.ReapplyAsync(httpContext);
+
+        var correlationId = CorrelationId.For(httpContext);
+
+        var status = StatusCodes.Status500InternalServerError;
+        var title = "Internal Server Error";
+        var detail = "An unexpected error occurred.";
+        Dictionary<string, string[]>? errors = null;   // field -> messages, validation only
+
+        if (exception is ValidationException vex)
+        {
+            status = StatusCodes.Status400BadRequest;
+            title = "Validation Failed";
+            detail = "One or more fields are invalid.";
+            errors = vex.Errors
+                .GroupBy(e => JsonNamingPolicy.CamelCase.ConvertName(e.PropertyName))
+                .ToDictionary(g => g.Key, g => g.Select(e => e.ErrorMessage).ToArray());
+        }
+        else if (exception is DomainNotFoundException) { status = 404; title = "Not Found"; detail = exception.Message; }
+        else if (exception is DomainConflictException) { status = 409; title = "Conflict"; detail = exception.Message; }
+        else if (exception is DomainReferenceException) { status = 422; title = "Unprocessable Entity"; detail = exception.Message; }
+        else if (exception is DomainValidationException) { status = 400; title = "Bad Request"; detail = exception.Message; }
+        else if (exception is ApiBadRequestException) { status = 400; title = "Bad Request"; detail = exception.Message; }
+        else if (exception is PreconditionRequiredException) { status = 428; title = "Precondition Required"; detail = exception.Message; }
+        else if (exception is InvalidCredentialsException or InvalidRefreshTokenException)
+        {
+            status = 401; title = "Unauthorized"; detail = exception.Message;
+            httpContext.Response.Headers.WWWAuthenticate = "Bearer";
+        }
+        else if (exception is ForbiddenException) { status = 403; title = "Forbidden"; detail = exception.Message; }
+        else if (exception is DbUpdateConcurrencyException)
+        {
+            if (httpContext.Request.Headers.ContainsKey("If-Match"))
+            {
+                status = 412; title = "Precondition Failed";
+                detail = "This record was changed by someone else since you loaded it. Reload it and try again.";
+            }
+            else
+            {
+                status = 409; title = "Conflict";
+                detail = "This record was changed by someone else at the same time. Reload it and try again.";
+            }
+        }
+        else if (exception is DbUpdateException { InnerException: PostgresException { SqlState: PostgresErrorCodes.UniqueViolation } })
+        {
+            status = 409; title = "Conflict";
+            detail = "That record already exists (it would break a uniqueness rule).";
+        }
+
+        if (status >= 500)
+            logger.LogError(exception, "Request failed with status {Status}. CorrelationId: {CorrelationId}", status, correlationId);
+        else
+            logger.LogInformation("Request rejected with status {Status} ({ExceptionType}). CorrelationId: {CorrelationId}",
+                status, exception.GetType().Name, correlationId);
+
+        var problemDetails = new ProblemDetails { Status = status, Title = title, Detail = detail };
+        problemDetails.Extensions["correlationId"] = correlationId;
+        if (errors is not null) problemDetails.Extensions["errors"] = errors;
+
+        httpContext.Response.StatusCode = status;
+        httpContext.Response.ContentType = "application/problem+json";
+        await httpContext.Response.WriteAsync(JsonSerializer.Serialize(problemDetails), cancellationToken);
+        return true;
+    }
+}
+
+----- FILE: API\Web\CorsSetup.cs -----
+using Microsoft.AspNetCore.Cors.Infrastructure;
+
+namespace RondiTrack.Web;
+
+public static class CorsSetup
+{
+    public static IServiceCollection AddFrontendCors(this IServiceCollection services)
+    {
+        services.AddCors();
+        // Options pattern = read lazily, so test UseSetting overrides are always seen
+        services.AddOptions<CorsOptions>().Configure<IConfiguration>((o, config) =>
+        {
+            var origins = config.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? [];
+            if (origins.Any(x => x.Contains('*') || x.EndsWith('/')))
+                throw new InvalidOperationException("Cors:AllowedOrigins must be exact origins: no '*', no trailing slash.");
+
+            o.AddPolicy(CorsPolicies.Frontend, p => p
+                .WithOrigins(origins)                                   // empty list = nobody allowed
+                .WithMethods("GET", "POST", "PUT", "PATCH", "DELETE")
+                .WithHeaders("Content-Type", "Authorization", ApiHeaders.IdempotencyKey, "If-Match", "If-None-Match")
+                .WithExposedHeaders("Retry-After", ApiHeaders.IdempotencyReplayed, "ETag", "Location")
+                .AllowCredentials()
+                .SetPreflightMaxAge(TimeSpan.FromMinutes(10)));
+        });
+        return services;
+    }
+
+    /// The exception handler clears response headers, so CORS headers set earlier are lost on
+    /// exception-based errors (404/403/409/500). Call this at the top of the handler to put them back.
+    public static async Task ReapplyAsync(HttpContext ctx)
+    {
+        var sp = ctx.RequestServices;
+        if (sp is null) return;                                   // bare DefaultHttpContext in unit tests: nothing to reapply
+        var provider = sp.GetService<ICorsPolicyProvider>();
+        var service = sp.GetService<ICorsService>();
+        if (provider is null || service is null) return;          // CORS not registered
+        var policy = await provider.GetPolicyAsync(ctx, CorsPolicies.Frontend);
+        if (policy is null) return;
+        service.ApplyResult(service.EvaluatePolicy(ctx, policy), ctx.Response);
+    }
+}
+
+----- FILE: API\Web\RateLimitingSetup.cs -----
+using System.Security.Claims;
+using System.Threading.RateLimiting;
+using Microsoft.AspNetCore.RateLimiting;
+using RondiTrack.Telemetry;
+
+namespace RondiTrack.Web;
+
+public static class RateLimitingSetup
+{
+    public static IServiceCollection AddRondiRateLimiting(this IServiceCollection services)
+    {
+        services.AddRateLimiter(_ => { });
+        services.AddOptions<RateLimiterOptions>().Configure<IConfiguration>((o, cfg) =>
+        {
+            o.RejectionStatusCode = StatusCodes.Status429TooManyRequests;   // default is 503
+            o.OnRejected = WriteRejectionAsync;
+
+            var login = cfg.GetSection("RateLimiting:Login");
+            o.AddPolicy(RateLimitPolicies.Login, ctx =>
+                RateLimitPartition.GetFixedWindowLimiter(ClientIp(ctx), _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = login.GetValue("PermitLimit", 5),
+                    Window = TimeSpan.FromSeconds(login.GetValue("WindowSeconds", 60.0)),
+                    QueueLimit = 0,
+                    AutoReplenishment = true
+                }));
+
+            o.AddPolicy(RateLimitPolicies.Contribution, ctx =>
+                RateLimitPartition.GetTokenBucketLimiter(UserKey(ctx), _ => Bucket(cfg.GetSection("RateLimiting:Contribution"))));
+
+            o.AddPolicy(RateLimitPolicies.Payout, ctx =>
+                RateLimitPartition.GetTokenBucketLimiter(UserKey(ctx), _ => Bucket(cfg.GetSection("RateLimiting:Payout"))));
+        });
+        return services;
+    }
+
+    private static TokenBucketRateLimiterOptions Bucket(IConfigurationSection s) => new()
+    {
+        TokenLimit = s.GetValue("TokenLimit", 30),
+        TokensPerPeriod = s.GetValue("TokensPerPeriod", 5),
+        ReplenishmentPeriod = TimeSpan.FromSeconds(s.GetValue("ReplenishSeconds", 60.0)),
+        QueueLimit = 0,              // reject, never hold a money request open
+        AutoReplenishment = true
+    };
+
+    private static string ClientIp(HttpContext c) => "ip:" + (c.Connection.RemoteIpAddress?.ToString() ?? "unknown");
+
+    // signed-in user id; falls back to IP only for unauthenticated callers (they'll get 401 afterwards)
+    private static string UserKey(HttpContext c) =>
+        c.User.FindFirstValue("sub") is { Length: > 0 } sub ? "user:" + sub : ClientIp(c);
+
+    private static async ValueTask WriteRejectionAsync(OnRejectedContext ctx, CancellationToken ct)
+    {
+        var http = ctx.HttpContext;
+        var seconds = 1;
+        if (ctx.Lease.TryGetMetadata(MetadataName.RetryAfter, out var retry))
+            seconds = Math.Max(1, (int)Math.Ceiling(retry.TotalSeconds));
+
+        http.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+        http.Response.Headers.RetryAfter = seconds.ToString();
+
+        var problem = new Microsoft.AspNetCore.Mvc.ProblemDetails
+        {
+            Status = 429,
+            Title = "Too many requests",
+            Detail = $"Rate limit reached. Try again in {seconds} second(s).",
+            Type = "https://www.rfc-editor.org/rfc/rfc6585#section-4"
+        };
+        problem.Extensions["correlationId"] = CorrelationId.For(http);   // your 6.2 helper
+        await http.Response.WriteAsJsonAsync(problem, options: null, contentType: "application/problem+json", ct);
+    }
+}
+----- FILE: Domain\RefreshToken.cs -----
+namespace RondiTrack.Domain;
+
+// NEW 6.1: one refresh token. Every token from ONE login shares a FamilyId,
+// so one reuse can revoke the whole chain.
+public sealed class RefreshToken
+{
+    public Guid Id { get; private set; }
+    public Guid UserId { get; private set; }
+    public Guid FamilyId { get; private set; }                 // one login = one family
+    public string TokenHash { get; private set; } = null!;     // only the hash is stored
+    public DateTime CreatedAtUtc { get; private set; }
+    public DateTime ExpiresAtUtc { get; private set; }
+    public DateTime? UsedAtUtc { get; private set; }           // set when it was rotated
+    public DateTime? RevokedAtUtc { get; private set; }        // set on logout or reuse
+    public Guid? ReplacedByTokenId { get; private set; }       // the token that replaced it
+
+    private RefreshToken() { } // for EF Core only
+
+    public RefreshToken(Guid userId, Guid familyId, string tokenHash, DateTime nowUtc, DateTime expiresAtUtc)
+    {
+        Id = Guid.NewGuid();
+        UserId = userId;
+        FamilyId = familyId;
+        TokenHash = tokenHash;
+        CreatedAtUtc = nowUtc;
+        ExpiresAtUtc = expiresAtUtc;
+    }
+}
+----- FILE: Domain\User.cs -----
+using System.Net.Mail;
+
+namespace RondiTrack.Domain;
+
+public sealed class User
+{
+    public const int MaxNameLength = 100;
+
+    public Guid Id { get; private set; }
+    public string FullName { get; private set; }
+    public string Email { get; private set; }
+    public DateTime CreatedAtUtc { get; private set; }
+
+    // NEW 6.1: the password HASH (never the password). Null for users created without a password.
+    public string? PasswordHash { get; private set; }
+
+    // NEW 6.1: platform-level flag (not per stokvel). Becomes a role claim in the token.
+    public bool IsPlatformAdmin { get; private set; }
+
+    // ADDED 5.3: PostgreSQL's built-in row version (xmin). Not a real column.
+    public uint Version { get; private set; }
+
+    // Real navigation, one user has many memberships
+    public List<StokvelMember> Memberships { get; } = [];
+
+    private User() { FullName = null!; Email = null!; } // for EF Core only
+
+    public User(string fullName, string email)
+    {
+        Id = Guid.NewGuid();
+        CreatedAtUtc = DateTime.UtcNow;
+        FullName = ValidateName(fullName);
+        Email = ValidateEmail(email);
+    }
+
+    // CHANGED 5.4: internal -> public, because SeedData now lives in the Infrastructure project
+    public User(Guid id, string fullName, string email) : this(fullName, email)
+    {
+        Id = id;
+    }
+
+    // ADDED 5.3: "the client last saw THIS version". Called before saving an update from a PUT.
+    public void SetExpectedVersion(uint version) => Version = version;
+
+    // NEW 6.1: stores the hash made by PasswordHasher<User>
+    public void SetPasswordHash(string passwordHash)
+    {
+        if (string.IsNullOrWhiteSpace(passwordHash))
+            throw new DomainValidationException("Password hash is required.");
+
+        PasswordHash = passwordHash;
+    }
+
+    public void UpdateDetails(string fullName, string email)
+    {
+        var validName = ValidateName(fullName);
+        var validEmail = ValidateEmail(email);
+        FullName = validName;
+        Email = validEmail;
+    }
+
+    private static string ValidateName(string? fullName)
+    {
+        if (string.IsNullOrWhiteSpace(fullName))
+            throw new DomainValidationException("Full name is required.");
+
+        var trimmed = fullName.Trim();
+        if (trimmed.Length > MaxNameLength)
+            throw new DomainValidationException($"Full name cannot exceed {MaxNameLength} characters.");
+
+        return trimmed;
+    }
+
+    // Emails are trimmed and lower-cased here, so Lerato@X.com and lerato@x.com become the same value
+    private static string ValidateEmail(string? email)
+    {
+        if (string.IsNullOrWhiteSpace(email))
+            throw new DomainValidationException("Email is required.");
+
+        var trimmed = email.Trim();
+        if (!MailAddress.TryCreate(trimmed, out var parsed)
+            || parsed.Address != trimmed
+            || !parsed.Host.Contains('.'))
+            throw new DomainValidationException("Email address is not valid.");
+
+        return trimmed.ToLowerInvariant();
+    }
+}
+----- FILE: Domain\Interfaces\IRefreshTokenRepository.cs -----
+namespace RondiTrack.Domain;
+
+// NEW 6.1: refresh tokens live in PostgreSQL, not in memory
+public interface IRefreshTokenRepository
+{
+    Task AddAsync(RefreshToken token);
+    Task<RefreshToken?> GetByHashAsync(string tokenHash);
+
+    // true only if THIS call marked it used (a single atomic UPDATE, so two requests cannot both win)
+    Task<bool> TryMarkUsedAsync(Guid tokenId, Guid replacedByTokenId, DateTime nowUtc);
+
+    // revokes every token that came from the same login
+    Task RevokeFamilyAsync(Guid familyId, DateTime nowUtc);
+}
+----- FILE: Domain\Interfaces\IUserRepository.cs -----
+namespace RondiTrack.Domain;   // same namespace as the entities, so no using lines change
+
+public interface IUserRepository   // moved here from Infrastructure/Data/UserRepository.cs
+{
+    Task<IReadOnlyList<User>> GetAllAsync();
+    Task<User?> GetByIdAsync(Guid id);
+    Task<User?> GetByEmailAsync(string email);   // NEW 6.1: used by login
+    Task<bool> EmailExistsAsync(string email, Guid? excludingUserId = null);
+    Task AddAsync(User user);
+    Task UpdateAsync(User user);
+    Task<bool> DeleteAsync(Guid id);
+}
+----- FILE: Infrastructure\Data\EfRefreshTokenRepository.cs -----
+using Microsoft.EntityFrameworkCore;
+using RondiTrack.Domain;
+
+namespace RondiTrack.Data;
+
+// NEW 6.1: refresh tokens in PostgreSQL
+public sealed class EfRefreshTokenRepository(RondiTrackDbContext db) : IRefreshTokenRepository
+{
+    public async Task AddAsync(RefreshToken token)
+    {
+        db.RefreshTokens.Add(token);
+        await db.SaveChangesAsync();
+    }
+
+    // pure read, so not tracked
+    public async Task<RefreshToken?> GetByHashAsync(string tokenHash) =>
+        await db.RefreshTokens.AsNoTracking().FirstOrDefaultAsync(t => t.TokenHash == tokenHash);
+
+    // One UPDATE with a WHERE that only matches an unused, unrevoked token.
+    // If two requests race, only one gets "1 row changed"; the other gets 0 and is treated as reuse.
+    public async Task<bool> TryMarkUsedAsync(Guid tokenId, Guid replacedByTokenId, DateTime nowUtc)
+    {
+        var rows = await db.RefreshTokens
+            .Where(t => t.Id == tokenId && t.UsedAtUtc == null && t.RevokedAtUtc == null)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(t => t.UsedAtUtc, (DateTime?)nowUtc)
+                .SetProperty(t => t.ReplacedByTokenId, (Guid?)replacedByTokenId));
+        return rows == 1;
+    }
+
+    // Revokes every not-yet-revoked token of this login (the whole family)
+    public async Task RevokeFamilyAsync(Guid familyId, DateTime nowUtc) =>
+        await db.RefreshTokens
+            .Where(t => t.FamilyId == familyId && t.RevokedAtUtc == null)
+            .ExecuteUpdateAsync(s => s.SetProperty(t => t.RevokedAtUtc, (DateTime?)nowUtc));
+}
+----- FILE: Infrastructure\Data\UserRepository.cs -----
+using System.Collections.Concurrent;
+using RondiTrack.Domain;   // IUserRepository now comes from Domain
+
+namespace RondiTrack.Data;
+
+// interface removed: it now lives in Domain/Interfaces/IUserRepository.cs
+public sealed class InMemoryUserRepository : IUserRepository
+{
+    private readonly ConcurrentDictionary<Guid, User> _users = new();
+
+    public InMemoryUserRepository()
+    {
+        foreach (var user in SeedData.Users)
+            _users[user.Id] = user;
+    }
+
+    public Task<IReadOnlyList<User>> GetAllAsync() =>
+        Task.FromResult<IReadOnlyList<User>>(_users.Values.OrderBy(u => u.FullName).ToList());
+
+    public Task<User?> GetByIdAsync(Guid id)
+    {
+        _users.TryGetValue(id, out var user);
+        return Task.FromResult<User?>(user);
+    }
+
+    // NEW 6.1: needed because the interface has a new method
+    public Task<User?> GetByEmailAsync(string email)
+    {
+        var normalized = email.Trim();
+        var user = _users.Values.FirstOrDefault(u =>
+            string.Equals(u.Email, normalized, StringComparison.OrdinalIgnoreCase));
+        return Task.FromResult<User?>(user);
+    }
+
+    public Task<bool> EmailExistsAsync(string email, Guid? excludingUserId = null)
+    {
+        var normalized = email.Trim();
+        var exists = _users.Values.Any(u =>
+            u.Id != excludingUserId &&
+            string.Equals(u.Email, normalized, StringComparison.OrdinalIgnoreCase));
+        return Task.FromResult(exists);
+    }
+
+    public Task AddAsync(User user)
+    {
+        _users[user.Id] = user;
+        return Task.CompletedTask;
+    }
+
+    public Task UpdateAsync(User user)
+    {
+        _users[user.Id] = user;
+        return Task.CompletedTask;
+    }
+
+    public Task<bool> DeleteAsync(Guid id) => Task.FromResult(_users.TryRemove(id, out _));
+}
+----- FILE: RondiTrack.Tests\AuthenticationTests.cs -----
+using System.Net;
+using System.Net.Http.Headers;
+using System.Net.Http.Json;
+using System.Text.Json;
+using RondiTrack.Tests.TestSupport;
+using Xunit;
+
+namespace RondiTrack.Tests;
+
+// NEW 6.1: register, login, refresh rotation, reuse detection, logout
+[Collection("Postgres collection")]
+public class AuthenticationTests(PostgresApiFactory factory)
+{
+    private const string TestPassword = "a-long-test-password-123";   // throwaway test value, not a real secret
+    private const string CookieName = "rondi_refresh";
+
+    private readonly HttpClient _client = factory.CreateAnonymousClient();
+
+    // ---- helpers ----
+
+    private async Task<(string Email, Guid UserId)> RegisterAsync(string? email = null)
+    {
+        email ??= $"auth{Guid.NewGuid():N}@example.com";
+        var response = await _client.PostAsJsonAsync("/api/v1/auth/register",
+            new { FullName = "Auth Tester", Email = email, Password = TestPassword });
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+
+        using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        return (email, doc.RootElement.GetProperty("id").GetGuid());
+    }
+
+    private Task<HttpResponseMessage> LoginAsync(string email, string password = TestPassword) =>
+        _client.PostAsJsonAsync("/api/v1/auth/login", new { Email = email, Password = password });
+
+    // POST with the refresh cookie set by hand
+    private Task<HttpResponseMessage> PostWithCookieAsync(string url, string? cookie)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, url);
+        if (cookie is not null) request.Headers.Add("Cookie", $"{CookieName}={cookie}");
+        return _client.SendAsync(request);
+    }
+
+    private static string? CookieValue(HttpResponseMessage response)
+    {
+        if (!response.Headers.TryGetValues("Set-Cookie", out var values)) return null;
+        var line = values.FirstOrDefault(v => v.StartsWith($"{CookieName}="));
+        return line?.Split(';')[0][(CookieName.Length + 1)..];
+    }
+
+    private static async Task<string> AccessTokenAsync(HttpResponseMessage response)
+    {
+        using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        return doc.RootElement.GetProperty("accessToken").GetString()!;
+    }
+
+    // ---- registration ----
+
+    [Fact]
+    public async Task Register_With_Short_Password_Returns_400_Problem()
+    {
+        var response = await _client.PostAsJsonAsync("/api/v1/auth/register",
+            new { FullName = "Short Pass", Email = $"short{Guid.NewGuid():N}@example.com", Password = "tooshort" });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("application/problem+json", response.Content.Headers.ContentType?.MediaType);
+    }
+
+    [Fact]
+    public async Task Register_Same_Email_With_Different_Casing_Returns_409()
+    {
+        var email = $"Lerato{Guid.NewGuid():N}@X.com";
+        await RegisterAsync(email);
+
+        var second = await _client.PostAsJsonAsync("/api/v1/auth/register",
+            new { FullName = "Lerato Again", Email = email.ToLowerInvariant(), Password = TestPassword });
+
+        Assert.Equal(HttpStatusCode.Conflict, second.StatusCode);
+        Assert.Equal("application/problem+json", second.Content.Headers.ContentType?.MediaType);
+    }
+
+    // ---- login ----
+
+    [Fact]
+    public async Task Login_Returns_Access_Token_In_Body_And_Refresh_Token_Only_In_Cookie()
+    {
+        var (email, userId) = await RegisterAsync();
+
+        var response = await LoginAsync(email);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var cookie = CookieValue(response);
+        Assert.False(string.IsNullOrEmpty(cookie));
+
+        // the refresh token must NOT be in the body
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain(cookie!, body);
+        Assert.DoesNotContain("refreshToken", body, StringComparison.OrdinalIgnoreCase);
+
+        // cookie flags
+        var setCookie = response.Headers.GetValues("Set-Cookie").First(v => v.StartsWith($"{CookieName}=")).ToLowerInvariant();
+        Assert.Contains("httponly", setCookie);
+        Assert.Contains("secure", setCookie);
+        Assert.Contains("samesite=strict", setCookie);
+        Assert.Contains("path=/api/v1/auth", setCookie);
+
+        // the access token really works: own account 200, someone else's 403
+        using var doc = JsonDocument.Parse(body);
+        var token = doc.RootElement.GetProperty("accessToken").GetString()!;
+
+        var own = new HttpRequestMessage(HttpMethod.Get, $"/api/v1/users/{userId}");
+        own.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        Assert.Equal(HttpStatusCode.OK, (await _client.SendAsync(own)).StatusCode);
+
+        var other = new HttpRequestMessage(HttpMethod.Get, $"/api/v1/users/{Guid.NewGuid()}");
+        other.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        Assert.Equal(HttpStatusCode.Forbidden, (await _client.SendAsync(other)).StatusCode);
+    }
+
+    [Fact]
+    public async Task Wrong_Password_And_Unknown_Email_Return_Identical_Problem_Details()
+    {
+        var (email, _) = await RegisterAsync();
+
+        var wrongPassword = await LoginAsync(email, "totally-wrong-password-1");
+        var unknownEmail = await LoginAsync($"nobody{Guid.NewGuid():N}@example.com");
+
+        Assert.Equal(HttpStatusCode.Unauthorized, wrongPassword.StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, unknownEmail.StatusCode);
+        Assert.Equal("application/problem+json", wrongPassword.Content.Headers.ContentType?.MediaType);
+
+        // same status, title and detail (only the correlationId differs)
+        Assert.Equal(await ProblemJson.ReadAsync(wrongPassword), await ProblemJson.ReadAsync(unknownEmail));
+    }
+
+    // ---- refresh ----
+
+    [Fact]
+    public async Task Refresh_Rotates_The_Token()
+    {
+        var (email, _) = await RegisterAsync();
+        var login = await LoginAsync(email);
+        var first = CookieValue(login)!;
+
+        var refreshed = await PostWithCookieAsync("/api/v1/auth/refresh", first);
+        Assert.Equal(HttpStatusCode.OK, refreshed.StatusCode);
+
+        var second = CookieValue(refreshed)!;
+        Assert.NotEqual(first, second);                         // a NEW refresh token
+        Assert.False(string.IsNullOrEmpty(await AccessTokenAsync(refreshed)));
+
+        // the new token works too
+        var again = await PostWithCookieAsync("/api/v1/auth/refresh", second);
+        Assert.Equal(HttpStatusCode.OK, again.StatusCode);
+    }
+
+    [Fact]
+    public async Task Replaying_An_Old_Refresh_Token_Returns_401_And_Kills_The_Newer_Token()
+    {
+        var (email, _) = await RegisterAsync();
+        var oldToken = CookieValue(await LoginAsync(email))!;
+
+        var rotated = await PostWithCookieAsync("/api/v1/auth/refresh", oldToken);
+        var newToken = CookieValue(rotated)!;
+
+        // replay the OLD token: 401
+        var replay = await PostWithCookieAsync("/api/v1/auth/refresh", oldToken);
+        Assert.Equal(HttpStatusCode.Unauthorized, replay.StatusCode);
+        Assert.Equal("application/problem+json", replay.Content.Headers.ContentType?.MediaType);
+
+        // the NEWER token is now dead as well (whole family revoked)
+        var afterReuse = await PostWithCookieAsync("/api/v1/auth/refresh", newToken);
+        Assert.Equal(HttpStatusCode.Unauthorized, afterReuse.StatusCode);
+    }
+
+    [Fact]
+    public async Task Refresh_Without_A_Cookie_Returns_401()
+    {
+        var response = await PostWithCookieAsync("/api/v1/auth/refresh", null);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.Equal("application/problem+json", response.Content.Headers.ContentType?.MediaType);
+    }
+
+    // ---- logout ----
+
+    [Fact]
+    public async Task After_Logout_Refreshing_Returns_401()
+    {
+        var (email, _) = await RegisterAsync();
+        var token = CookieValue(await LoginAsync(email))!;
+
+        var logout = await PostWithCookieAsync("/api/v1/auth/logout", token);
+        Assert.Equal(HttpStatusCode.NoContent, logout.StatusCode);
+
+        var refresh = await PostWithCookieAsync("/api/v1/auth/refresh", token);
+        Assert.Equal(HttpStatusCode.Unauthorized, refresh.StatusCode);
+    }
+
+    [Fact]
+    public async Task Logout_Is_Idempotent()
+    {
+        var (email, _) = await RegisterAsync();
+        var token = CookieValue(await LoginAsync(email))!;
+
+        Assert.Equal(HttpStatusCode.NoContent, (await PostWithCookieAsync("/api/v1/auth/logout", token)).StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, (await PostWithCookieAsync("/api/v1/auth/logout", token)).StatusCode);     // same token again
+        Assert.Equal(HttpStatusCode.NoContent, (await PostWithCookieAsync("/api/v1/auth/logout", null)).StatusCode);      // no cookie at all
+    }
+
+    // ---- secure by default ----
+
+    [Fact]
+    public async Task OpenApi_And_Scalar_Load_Without_A_Token()
+    {
+        Assert.Equal(HttpStatusCode.OK, (await _client.GetAsync("/openapi/v1.json")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await _client.GetAsync("/scalar/v1")).StatusCode);
+    }
+}
+----- FILE: RondiTrack.Tests\TestSupport\PostgresApiFactory.cs -----
+namespace RondiTrack.Tests.TestSupport;                       // folder is TestSupport, NOT Infrastructure
+
+using System.Net.Http.Headers;                                // AuthenticationHeaderValue
+using System.Security.Cryptography;                           // random test signing key
+using Microsoft.AspNetCore.Hosting;                           // IWebHostBuilder
+using Microsoft.AspNetCore.Mvc.Testing;                       // WebApplicationFactory
+using Microsoft.EntityFrameworkCore;                          // UseNpgsql, MigrateAsync
+using Microsoft.Extensions.DependencyInjection;               // GetRequiredService
+using Microsoft.Extensions.Logging;                           // NEW 6.2: needed for AddProvider
+using RondiTrack.Auth;                                        // ITokenService
+using RondiTrack.Data;                                        // RondiTrackDbContext
+using Testcontainers.PostgreSql;                              // the PostgreSQL container
+
+public class PostgresApiFactory : WebApplicationFactory<Program>, IAsyncLifetime
+{
+    private readonly PostgreSqlContainer _container = new PostgreSqlBuilder("postgres:17")   // CHANGED: image goes in the constructor (removes the obsolete warning)
+        .WithDatabase("ronditrack_test")                      // test database name
+        .WithUsername("postgres")                             // test username
+        .WithPassword("postgres")                             // test password
+        .Build();                                             // create the container object
+
+    // NEW 6.1: a random signing key made fresh on every run. Nothing is committed.
+    private readonly string _jwtKey = Convert.ToBase64String(RandomNumberGenerator.GetBytes(48));
+
+    // NEW 6.2: every log line the app writes during a test run ends up here
+    public CapturingLoggerProvider CapturedLogs { get; } = new();
+
+    public async Task InitializeAsync()
+    {
+        await _container.StartAsync();                        // start the Docker container first
+
+        TestDb.ConnectionString = _container.GetConnectionString();   // TestDb helpers use the container too
+
+        // Program.cs seeds data at startup (Development), so the tables must exist BEFORE the app starts.
+        var options = new DbContextOptionsBuilder<RondiTrackDbContext>()
+            .UseNpgsql(_container.GetConnectionString())      // point at the container
+            .Options;                                         // build the options
+        await using var db = new RondiTrackDbContext(options); // temporary context just for migrating
+        await db.Database.MigrateAsync();                     // create all tables in the empty container
+    }
+
+    protected override void ConfigureWebHost(IWebHostBuilder builder)
+    {
+        builder.ConfigureLogging(logging => logging.AddProvider(CapturedLogs));   // NEW 6.2: capture logs for the leak test
+
+        // UseSetting (NOT ConfigureAppConfiguration) so Program.cs sees it at startup.
+        // "RondiTrack" is the exact key your Program.cs reads.
+        builder.UseSetting("ConnectionStrings:RondiTrack", _container.GetConnectionString());
+        builder.UseSetting("Jwt:SigningKey", _jwtKey);
+        builder.UseSetting("RateLimiting:Login:PermitLimit", "10000");   // old tests must not trip the limits
+        builder.UseSetting("RateLimiting:Contribution:TokenLimit", "10000");
+        builder.UseSetting("RateLimiting:Payout:TokenLimit", "10000");        // NEW 6.1: the app refuses to start without it
+    }
+
+    // NEW 6.1: every client made with CreateClient() starts signed in as a platform admin.
+    // That is how the old tests (which know nothing about auth) keep passing without any change.
+    protected override void ConfigureClient(HttpClient client)
+    {
+        base.ConfigureClient(client);
+        client.DefaultRequestHeaders.Authorization =
+            new AuthenticationHeaderValue("Bearer", MintToken(Guid.NewGuid(), platformAdmin: true));
+    }
+
+    // NEW 6.1: makes a real access token with the app's own TokenService (same key, same validation path)
+    public string MintToken(Guid userId, bool platformAdmin = false) =>
+        Services.GetRequiredService<ITokenService>().CreateAccessToken(userId, platformAdmin).Value;
+
+    // NEW 6.1: a client signed in as one specific (non-admin) user
+    public HttpClient CreateClientFor(Guid userId)
+    {
+        var client = CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", MintToken(userId));
+        return client;
+    }
+
+    // NEW 6.1: a client with no token. Uses https and no cookie handling, so tests read Set-Cookie by hand.
+    public HttpClient CreateAnonymousClient()
+    {
+        var client = CreateClient(new WebApplicationFactoryClientOptions
+        {
+            BaseAddress = new Uri("https://localhost"),
+            HandleCookies = false,
+            AllowAutoRedirect = false
+        });
+        client.DefaultRequestHeaders.Authorization = null;
+        return client;
+    }
+
+    async Task IAsyncLifetime.DisposeAsync() => await _container.DisposeAsync(); // remove container after tests
+}
+
+[CollectionDefinition("Postgres collection")]                 // name the test classes use
+public class PostgresCollection : ICollectionFixture<PostgresApiFactory> { } // one shared container for all tests
+----- FILE: RondiTrack.Tests\TestSeed.cs -----
+using Microsoft.Extensions.DependencyInjection;
+using RondiTrack.Auth;
+using RondiTrack.Data;
+using RondiTrack.Domain;
+
+namespace RondiTrack.Tests;
+
+// 6.3/6.4: shared helpers so each test builds its own users/stokvels (no leftovers between tests)
+public static class TestSeed
+{
+    // Makes a real user row, returns its id
+    public static async Task<Guid> UserAsync(IServiceProvider sp)
+    {
+        using var scope = sp.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<RondiTrackDbContext>();
+        var u = new User("Test User", $"{Guid.NewGuid():N}@test.example");
+        db.Users.Add(u);
+        await db.SaveChangesAsync();
+        return u.Id;
+    }
+
+    // Makes a stokvel with the given members/roles and N cycles.
+    // firstEndsOn = null -> plain cycles (no end date, the job ignores them)
+    public static async Task<(Guid StokvelId, Guid[] CycleIds)> StokvelAsync(
+        IServiceProvider sp, (Guid UserId, StokvelRole Role)[] members, int cycles = 1,
+        decimal amount = 500m, DateOnly? firstEndsOn = null,
+        ContributionFrequency freq = ContributionFrequency.Monthly)
+    {
+        using var scope = sp.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<RondiTrackDbContext>();
+
+        var s = new Stokvel($"Test {Guid.NewGuid():N}", amount, freq, Math.Max(2, members.Length));
+        db.Stokvels.Add(s);
+        await db.SaveChangesAsync();                         // parent first
+
+        for (var i = 0; i < members.Length; i++)
+            db.StokvelMembers.Add(new StokvelMember(s.Id, members[i].UserId, i + 1, members[i].Role));
+
+        var ids = new List<Guid>();
+        for (var n = 1; n <= cycles; n++)
+        {
+            var c = firstEndsOn is null
+                ? new ContributionCycle(s.Id, n, amount)
+                : new ContributionCycle(s.Id, n, amount, firstEndsOn.Value.AddMonths(n - 1), DateTime.UtcNow);
+            db.ContributionCycles.Add(c);
+            ids.Add(c.Id);
+        }
+        await db.SaveChangesAsync();
+        return (s.Id, ids.ToArray());
+    }
+
+    // Mints a real access token with the host's own TokenService (same key, same checks)
+    public static string Token(IServiceProvider sp, Guid userId) =>
+        sp.GetRequiredService<ITokenService>().CreateAccessToken(userId, false).Value;
+}
+----- FILE: RondiTrack.Tests\Test.Db.cs -----
+using Microsoft.EntityFrameworkCore;
+using RondiTrack.Data;
+using RondiTrack.Domain;
+
+namespace RondiTrack.Tests;
+
+// NEW 5.3: helpers so tests can talk to PostgreSQL directly with their own DbContexts.
+public static class TestDb
+{
+    // CHANGED 5.4: the factory sets this to the Testcontainers connection string
+    public static string? ConnectionString { get; set; }
+
+    // Every call returns a brand new, independent DbContext (own connection, own tracking).
+    public static RondiTrackDbContext NewDb()
+    {
+        // CHANGED 5.4: no more user-secrets, so tests can never touch the dev database
+        var connectionString = ConnectionString
+            ?? throw new InvalidOperationException("Test container is not started. Add [Collection(\"Postgres collection\")] to the test class.");
+
+        var options = new DbContextOptionsBuilder<RondiTrackDbContext>()
+            .UseNpgsql(connectionString, n => n.EnableRetryOnFailure(4, TimeSpan.FromSeconds(10), null))
+            .Options;
+
+        return new RondiTrackDbContext(options);
+    }
+
+    // A brand new stokvel + user + member + cycle, so a test never depends on leftover data.
+    public static async Task<(Guid StokvelId, Guid UserId, Guid CycleId)> SeedMemberAndCycleAsync()
+    {
+        await using var db = NewDb();
+
+        var stokvel = new Stokvel($"Test {Guid.NewGuid()}", 100m, ContributionFrequency.Monthly, 5);
+        var user = new User("Test Member", $"t-{Guid.NewGuid()}@example.com");
+        db.Users.Add(user);
+        db.Stokvels.Add(stokvel);
+        await db.SaveChangesAsync();                 // parents first
+
+        var cycle = new ContributionCycle(stokvel.Id, 1, 100m);
+        db.StokvelMembers.Add(new StokvelMember(stokvel.Id, user.Id, 1));
+        db.ContributionCycles.Add(cycle);
+        await db.SaveChangesAsync();
+
+        return (stokvel.Id, user.Id, cycle.Id);
+    }
+
+    public static async Task<Guid> SeedPayoutAsync()
+    {
+        var (stokvelId, userId, cycleId) = await SeedMemberAndCycleAsync();
+        await using var db = NewDb();
+        var payout = new Payout(stokvelId, cycleId, userId, 100m);
+        db.Payouts.Add(payout);
+        await db.SaveChangesAsync();
+        return payout.Id;
+    }
+}
+----- FILE: scripts\check-login.mjs -----
+// Shows which Set-Cookie header carries the refresh token. Run: node scripts/check-login.mjs
+const res = await fetch('http://localhost:5134/api/auth/login', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ email: 'lerato.demo@example.com', password: 'Demo-password-123' }),
+});
+console.log('status:', res.status);
+console.log('set-cookie:', res.headers.getSetCookie()); // the refresh token is in here
+console.log('body keys:', Object.keys(await res.json()));

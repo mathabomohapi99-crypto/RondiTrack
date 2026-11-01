@@ -827,3 +827,215 @@ Test summary: total: 66, failed: 0, succeeded: 66, skipped: 0
 - Next payout date is calculated (cycle start + one period) because there is no payout schedule in the model.
 - Roles are still set in the database (no endpoint to change a role, from 6.1).
 - No login rate limit yet, so the "one IP for everyone" effect of the Next.js server is not visible today.
+
+---
+
+# Week 8.2: Data and sign-in
+
+## Running it (Week 8.2)
+
+1. API: `dotnet run --project API --launch-profile http` (port 5134). Docker must be running for `dotnet test`.
+2. In `web-next/`: `npm install`, then `npm run dev` (http://localhost:3000). Production check: `npm run build` then `npm start`.
+3. `.env.local` has `API_BASE_URL`, `SESSION_SECRET` and two new optional settings:
+   - `REFRESH_MARGIN_SECONDS` (default 120): how early `proxy.ts` refreshes. Only I set it high, to provoke the race.
+   - `SEQUENTIAL_FETCH=1`: only to time the "one await per line" version.
+4. `node scripts/check-refresh.mjs` runs the refresh checks from Node.
+
+## API check
+
+Answered against the running API (`scripts/check-refresh.mjs` for question 1).
+
+| # | Question | My answer |
+|---|----------|-----------|
+| 1 | Refresh from Node: what comes back, where is the new refresh token, what happens to the new one when the old one is sent again? | `200`, body keys `accessToken`, `expiresAtUtc`, `tokenType`. The new refresh token is **only** in `Set-Cookie: rondi_refresh=...` (HttpOnly, Secure, SameSite=Strict, path `/api/v1/auth`). Sending the OLD token again gives `401` **and the whole token family is revoked**, so the NEW token then gets `401` too (test `Replaying_An_Old_Refresh_Token_Returns_401_And_Kills_The_Newer_Token`). Output: `TODO-PASTE the output of node scripts/check-refresh.mjs` |
+| 2 | Lifetimes? Which clock decides when someone must sign in again? | Access token **10 minutes** (`Jwt:AccessTokenMinutes`), refresh token **7 days** (`Jwt:RefreshTokenDays`), session cookie **7 days**. The **refresh token's 7 days decides**: the access token is replaced silently by `proxy.ts` while the refresh token is valid, and each rotation gives a new 7 days, so the cookie is rewritten with 7 days every time. The cookie matches the refresh token on purpose: a longer cookie would hold a dead session, a shorter one would sign people out while the API still trusts them. **Shared phone:** the next person to open the browser within 7 days is still signed in unless the owner pressed Sign out. Sign out revokes the refresh token and deletes the cookie, and the pins are wiped in the browser. |
+| 3 | Is there a register endpoint? What does it say for an email that already exists, and does that tell someone who uses RondiTrack? | Yes: `POST /api/v1/auth/register` (201, 400 for bad fields). An existing email gives **409** "An account with this email already exists", which **does** reveal who has an account. The register page never shows that sentence: for a 409 it says "We couldn't create an account with those details. If you already have an account, sign in instead." (same words as any failure). The API still answers 409 (existing test) and has no rate limit on register: see Known gaps. |
+| 4 | Latest contributions for one stokvel, newest first, a few at a time? | Before: only per cycle. **Added** `GET /api/v1/stokvels/{id}/contributions?pageSize=5&sort=-date` (all cycles, paged by `pageToken`). Tests: `StokvelHistoryTests` (default order and page size, non-member 404). |
+| 5 | A Member records for another member / a non-member records one: 403, 404? | Member for another member: **403** (`StokvelAccess`: member without the officer role gets `ForbiddenException`). A non-member: **404** (same text as a missing stokvel). |
+| 6 | Idempotency-Key answers from 7.4: still true? | Yes. Same key and same body: `201` with `Idempotency-Replayed: true`. Same key and a different amount: `409`. Missing key: `400` ("The Idempotency-Key header is required."). The contract did not move. |
+
+**API changes in this PR (with tests):** `GET /stokvels/{id}/contributions` (question 4). The activity feed, history filters and the 400 on a mismatched token are Week 8.3 (same files).
+
+## Cache Components
+
+`next.config.ts` has `cacheComponents: true` (every page is a static shell plus streamed parts) and `partialPrefetching: true` (links prefetch only the static shell).
+
+Every page returns a `<Suspense>` straight away; the session read and API calls run in a component inside it. I used no `export const instant = false` anywhere.
+
+| Route | What I did |
+|-------|-----------|
+| `/` | Redirect-only page: the session read moved into a `<Suspense>` child. |
+| `/login` | `searchParams` is read in a child inside `<Suspense>`. |
+| `/register` | Nothing blocking (no request data is read). |
+| `/dashboard/member`, `/dashboard/treasurer`, `/stokvels` | Heading outside, the API call in a child inside `<Suspense>` with a skeleton. |
+| `/stokvels/[id]` | `params`, session and API calls in `StokvelDetailView` inside `<Suspense>`; "Recent contributions" has its own boundary. |
+| `/stokvels/[id]/contributions` | `params`, `searchParams`, session and API in `History` inside `<Suspense>`; the filter controls have their own boundary (nuqs reads the URL). |
+| `/activity` | API call in a child inside `<Suspense>`. |
+| `/bff/*` | Route Handlers: they run per request, no boundary needed. |
+
+The sidebar was already in a `<Suspense>`. The root layout wraps the nuqs adapter in a `<Suspense>` because the adapter reads the URL with `useSearchParams`.
+`TODO-PASTE: if npx next build named any other route, add it here.` No Insight in `npm run dev`: `TODO-CONFIRM after clicking between the signed-in pages`.
+
+## Parallel and streamed
+
+The API already returns the cycle and the member count **with** the stokvel (8.1, question 6), so those are not separate requests. The really independent requests are the stokvel and its members list, started together and awaited with `Promise.all`. "Recent contributions" is started at the same moment but awaited only inside its own `<Suspense>`, so the top of the page never waits for it, and its skeleton rows have the shape of the real rows. A non-member or a missing id still gets the 8.1 not-found page, from inside the boundary. Only ids, names and cents cross into the browser.
+
+Timing of the page's data (stokvel + members), from the server log line `[stokvel page] ...`:
+
+| Version | ms |
+|---------|----|
+| One `await` per line (`SEQUENTIAL_FETCH=1`) | `TODO-PASTE` |
+| Parallel (`Promise.all`) | `TODO-PASTE` |
+
+## Contributions
+
+The 7.4 form is rebuilt on `useActionState` and a Server Action (`contributionActions.ts`). The action checks for itself: **session first, then the Zod schema (my cents parser), then the API**. Expected errors are **returned, not thrown**: 400 next to its fields; 409 and 422 with the API's detail; 429 with the wait; every one with the reference. The typed values come back in the action's state and become the inputs' `defaultValue`, so a failure keeps what the person typed even though React resets action forms. The button is disabled while `pending`.
+
+**The key is a hidden field the server writes.** The server renders the first `Idempotency-Key`; the action returns the key for the next request. A second hidden field, `keyFor`, remembers which member and amount the key belongs to. 7.4 table, row by row:
+
+| Situation | Key | How the Server Action follows it |
+|-----------|-----|-----------------------------------|
+| Retry after no answer (network error) | same | returns `idempotencyKey` unchanged with `keyFor` = this member + amount; the retry has the same fingerprint, so the key is reused |
+| 429 (rejected before it used its key) | same | same as above, and the message shows the Retry-After wait |
+| 5xx | same | same as above |
+| Success (201, including a replay) | new | returns a fresh `crypto.randomUUID()` and `keyFor = ''` |
+| Member or amount changed after a failure | new | `keyFor` differs from the new fingerprint, so the action ignores the old key and makes a new one |
+| 400, 403, 404, 409, 422 (a real "no") | new | `rejected()` returns a fresh key |
+| Double click | one request | the button is disabled while pending; the API also answers a repeat with the stored response |
+| 401 | n/a | the session is over: redirect to `/login?expired=1` |
+
+**The new total with no reload:** the total is not cached under a tag, so the action calls `refresh()` (not `updateTag`): the page re-renders in the same response as the action.
+
+**Why the action's answer arrived but the page did not change (without `refresh()` or `updateTag`):** a Server Action's response carries its return value (the success message), not a new page. The cycle's total was rendered by a Server Component earlier, and the browser keeps that old page output until something tells the router the data changed. `refresh()` is that signal (it re-renders the current route and sends it back with the action's response); `updateTag` is the same signal for data cached under a tag. `TODO-PASTE: screenshot or note of the old total after leaving both calls out`
+
+## What we cache
+
+There is **no** `"use cache"`, `"use cache: private"`, `cacheLife` or `cacheTag` anywhere in this code, so the "we cache" part of the table is empty on purpose. Caching nothing is a valid outcome: every response from the API depends on who is asking.
+
+| Thing | Cached? | Why |
+|-------|---------|-----|
+| Paid / owed / my balance (`/me/stokvels`) | **No (deliberately)** | A member's balance is personal money. Every call uses the member's own token, and it must never be reused for anyone else. |
+| Stokvel detail: my role and the cycle's total | **No (deliberately)** | My role is per person. The total must be right after `refresh()`, which needs an uncached read. |
+| Members list, recent contributions, history, activity feed | No | They hold other people's names and amounts and depend on who may see them. |
+| Access token, refresh token, email | **Never** | A cached function would need the token as an argument or captured variable, and keys and tags are stored in plain text. That is my answer: nothing here is cached. |
+
+## Sessions and refresh
+
+- **Where:** `proxy.ts` is the only place a refresh happens (`refresh.ts` is only called from there). It refreshes when the access token has less than **120 seconds** left. Why 120: the token lives 10 minutes; a page render plus its API calls fit comfortably in 2 minutes, but we do not refresh on nearly every click. A refreshed session is written **twice**: into this request's `Cookie` header (so the page about to render sees it) and onto the response (so the browser keeps it).
+- **Refused refresh:** the session cookie is deleted and the person goes to `/login?expired=1` (JSON 401 for `/bff/` paths). If the API is unreachable, the session is kept and the page shows its own error.
+- **Route protection:** no session on a signed-in page means `/login?next=<path>`; after signing in the person returns there. `next` is followed only if it is a path on this site (`safeNext.ts`, tested): `//evil.example` and `/\evil.example` are refused. Pages, Server Actions and Route Handlers still check the session themselves; the proxy check is a convenience.
+- **Register:** a successful registration **signs the person in** straight away (register, then login at the API, then the session). If that sign-in fails they go to `/login`. Password managers: real `<label>`s, `autoComplete="username"` and `"current-password"` on sign-in, `"new-password"` on register, paste is never blocked.
+- **Sign out** is a POST (a Server Action), revokes the refresh token at the API, and deletes the session even if the API call fails.
+
+## The race
+
+My API revokes the whole token family when a spent refresh token comes back, so several requests refreshing with the same token at once look like theft.
+
+**Provoke it first.** `REFRESH_MARGIN_SECONDS=99999` in `.env.local`, `npm run build` and `npm start`, sign in, then in the Console: `await Promise.all([1, 2, 3].map(() => fetch('/stokvels')))`. This needs the version of `refresh.ts` **without** the shared refresh, so check out the file from before this PR or comment out the two early `return` branches in `refreshOnce`. The API's reuse warning:
+
+```
+TODO-PASTE the "Refresh token reuse detected for user ... Session ... revoked" line from the API log
+```
+
+**Fix, and where:** in the Next.js server (`refresh.ts`): one refresh per refresh token, shared by every request. A request that finds a refresh already running **joins it**; a request that arrives within **30 seconds after** one finished **reuses its result**. The API is unchanged.
+
+- **What it handles:** several tabs and several simultaneous requests in one Next.js server, including a request that left with the old cookie just before the new one was stored.
+- **What it does not handle:** (1) **several Next.js servers**: each has its own memory, so two servers can still refresh the same token at the same moment; that needs a grace window in the API or a shared store. (2) A request that arrives **more than 30 seconds** after the refresh with the old token is reuse, and the API will (correctly) revoke the session. (3) **How long a stolen token works:** unchanged, because the API's rules did not change; a stolen old token still triggers revocation as soon as it is used after rotation.
+
+**Proof 1: three tabs opened at once, and the Console line again:** `TODO-PASTE the API log showing no reuse warning`
+
+**Proof 2: one session for 20 minutes, a click every few minutes, no sign-in.** Server log lines (each refresh, with times):
+
+```
+TODO-PASTE the [refresh] lines from the Next.js server
+```
+
+## Treasurer actions
+
+The member picker shows only when **this** stokvel's `myRole` from the API's answer is Treasurer (the API treats Admin the same way for recording, so Admin also sees it). It is not read from the session, the token or "Treasurer anywhere". The members list is only passed to the browser when the picker shows.
+
+**Forced once, on purpose:** I set `FORCE_PICKER_FOR_SCREENSHOT = true` in `stokvels/[id]/page.tsx`, recorded a contribution for someone else as a Member, then set it back to `false`. The page says "You are not allowed to record a contribution for another member in this stokvel." with its reference. I stayed signed in and the form stayed usable. `TODO-PASTE screenshot path`
+
+A 403 never signs anyone out and never looks like a 401 (a 401 redirects to `/login?expired=1`). A 404 for a stokvel I'm not in is the same not-found page.
+
+## Known gaps
+
+- **Several Next.js servers** can still race on refresh (see The race).
+- **Register is not rate limited** and the API still answers 409 for an existing email, so someone calling the API directly can learn which emails exist. Only my page is neutral.
+- **The idempotency store is in memory** (`InMemoryIdempotencyStore`, the `TEMP 7.1` line in `Program.cs`), so replays are forgotten when the API restarts.
+- The history query reads contributions of a stokvel across cycles without a dedicated index on `(StokvelId, RecordedAtUtc)`.
+- The session cookie lives 7 days, so on a shared phone a person must press Sign out.
+
+---
+
+# Week 8.3: State
+
+## API check
+
+| # | Question | My answer |
+|---|----------|-----------|
+| 1 | Can the contributions list filter by member and time range and page with `pageSize` and `pageToken`? | **Built it** (it did not exist): `GET /api/v1/stokvels/{id}/contributions?member=&from=&to=&sort=&pageSize=&pageToken=`. Tests in `StokvelHistoryTests`. |
+| 2 | Instants or dates? | **Two UTC instants**: `from` **included**, `to` **excluded** (`RecordedAtUtc >= from AND < to`). The API never sees days. The front end turns South African days into instants in **one** function: `southAfricanDaysToUtcRange` (`src/lib/saDates.ts`). |
+| 3 | An activity feed? | **Built it**: `GET /api/v1/me/activity?pageSize=&pageToken=`: contributions, payouts and members joining, **only** for stokvels I belong to, newest first. Test: another stokvel's activity never appears. |
+| 4 | A `pageToken` with a different filter? | **400** ("pageToken was issued for a different sort or filter..."). Test `Page_token_from_one_filter_used_with_another_filter_returns_400`. |
+| 5 | `?member=` someone not in this stokvel, and a malformed date? | A member from elsewhere gives **200 with an empty page**, so it never reveals who is in other stokvels. A malformed date gives **400** like any bad input. The page never sends either: the URL parsers fall back to defaults first. |
+
+## Where each piece of state lives
+
+| State | Lives in | Why |
+|-------|----------|-----|
+| member / from / to / sort filters | **The URL** (nuqs) | A treasurer sends the link and another treasurer sees the same list; reload keeps it. |
+| Page one of the history and the feed | **The server** (rendered from the URL / the session) | It is private data; the server fetches it with the token. |
+| Later pages of the history and the feed | **TanStack Query** (browser memory) | It is server data fetched on demand, with loading and end-of-list status. |
+| Pinned stokvels (id and name) | **Zustand + localStorage** | No single page owns them, the API does not store them, several components need them. |
+| Whose pins they are (`ownerId`) | Zustand + localStorage | So pins are forgotten for a different person. |
+| Contribution form values and key | **The Server Action's state** (`useActionState`) | They only matter to that one form. |
+| "Show details" open/closed | `useState` in the card | Local to one card. |
+| The session (tokens) | **Encrypted HttpOnly cookie** | Never readable by the browser's JavaScript. |
+
+## Filters
+
+All filters live in the URL and are read by one parsers file (`src/lib/contributionSearchParams.ts`, imported from `nuqs/server`) shared by the page, the Route Handler and the filter controls. `nuqs` 2.10.2 is pinned and its adapter is in the root layout.
+
+| Filter | Parser | Default |
+|--------|--------|---------|
+| `member` | UUID only (`createParser`); anything else is ignored | `''` (everyone) |
+| `from` | strict real `YYYY-MM-DD` day, kept as **text**; `2026-02-30` is ignored | `''` |
+| `to` | same | `''` |
+| `sort` | allow-list `-date`, `date`, `amount`, `-amount` | `-date` |
+
+`?member=banana`, `?from=2026-02-30` and `?to=yesterday` fall back to the default: no error page and no 400 shown. Defaults leave the URL (`clearOnDefault: true`), so the unfiltered page has a clean address. A filter change uses `history: 'replace'`: tweaking a filter should not fill the Back button, so Back leaves the page. The server renders page one from the URL (`createLoader`) inside `<Suspense>`; the controls use `useQueryStates` with `shallow: false`, and "Updating the list…" shows while the server renders again. A filter that matches nothing shows an empty state with a "Show everything" link, not an error.
+
+## Dates
+
+South Africa is UTC+2 all year. "1 to 31 October" means `[2026-09-30T22:00:00Z, 2026-10-31T22:00:00Z)`: start included, end excluded, both computed from the day after in Johannesburg. No `23:59:59` anywhere, and nothing else in the code converts dates (the page and the Route Handler both go through `contributionsPath`, which calls the one function). The URL keeps plain dates, never `parseAsIsoDate`. Dates in the list are shown back in South African time (`Africa/Johannesburg`), so Thandi's 23:30 on 31 October reads as 31 October.
+
+Tests (`saDates.test.ts`) cover: 1 to 31 October bounds; 23:30 SAST on the 31st inside and 00:00 SAST on 1 November outside; a single day is 24 hours; from-only and to-only; `to` before `from` throws (our rule: the page ignores both dates and says so); `2026-02-30` is rejected, not rolled over to 2 March; year end and a leap day.
+
+```
+TODO-PASTE the passing run with TZ=UTC
+TODO-PASTE the passing run with TZ=Africa/Johannesburg
+```
+
+## Paging
+
+- **The browser never calls the API.** More pages come from Route Handlers on this site (`/bff/activity`, `/bff/contributions`) that read the session, call the API with the token and return JSON. No session is a JSON `401`, never a redirect, and `proxy.ts` answers `/bff/` paths the same way.
+- `useInfiniteQuery` (TanStack Query 5.104.2, pinned): `initialPageParam` is the token page one ended with; `getNextPageParam` returns `undefined` for an empty token; the filters are in the query key. An `IntersectionObserver` on the end of the list loads the next page, and a real **Load more** button does the same for the keyboard. A `role="status"` line says how many are showing and says "all" only when the API's token is really empty. While the first extra page loads, the button stays and the line does not say "all".
+- **A filter change starts the list again from page one.** The query key includes the filters and the token page one ended with, so no page from an old filter can appear under a new one. Proof of the 400 the wrong token would get (the app never sends it): with the history page open and unfiltered, copy a `pageToken` from a `/bff/contributions` request in the Network tab, then in the Console: `fetch('/bff/contributions?stokvelId=<ID>&member=<MEMBER ID>&pageToken=<TOKEN>').then(r => r.status)` gives `400`. `TODO-PASTE the result`
+- **After a contribution:** page one on the page being viewed is refreshed by `refresh()` in the Server Action. Other pages render fresh when visited (dynamic rendering). TanStack's later pages are dropped by `removeQueries(['contributions'])` and `removeQueries(['activity'])`, called by the form after a success.
+
+## Pinned stokvels
+
+Zustand 5.0.15, pinned, as the Zustand docs require for Next.js: a store **factory** (`createStore` from `zustand/vanilla`), **one store per provider** (`useState`), and a hook that reads it from context. No module-level store, and no Server Component reads or writes it. Only `{ id, name }` is stored: never a balance, a role or a member list. Saved with `persist`, loaded **after** the first render (`skipHydration`, then `rehydrate()` in an effect), so there are no hydration warnings. `TODO-CONFIRM: no hydration warnings in the console on a reload with pins saved.`
+
+**Sign-out forgets the pins, and so do expiry and refusal.** The Server Action cannot touch `localStorage`, so: signing out redirects to `/login`, and `/login` and `/register` render `ClearPinsOnLogin`, which clears the store and its saved copy in the browser. Arriving at `/login` always means nobody is signed in, whether the person signed out, the session expired or a refresh was refused, so one rule covers every case. A second guard: the store remembers `ownerId`, and when a different person is signed in the pins are dropped.
+
+**A pin for a stokvel the member has since left disappears:** the sidebar compares the pins with `/me/stokvels` and removes the ones I'm no longer in (opening one would only show the not-found page).
+
+## Known gaps
+
+- Pins are per browser, not per device account (not saved in the API).
+- Dates are interpreted as South African days only; there is no per-user time zone.
+- If the sidebar cannot load my stokvels, pins for stokvels I left are kept until it can.
+- Activity merges three queries in the API; very large feeds would need a database view.
+- An expired page one (a tab left open for hours) is not refreshed until the next navigation.

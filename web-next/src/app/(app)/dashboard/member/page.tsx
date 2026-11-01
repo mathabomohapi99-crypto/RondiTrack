@@ -1,25 +1,31 @@
-import { api, unwrap } from '@/lib/api';
+import { Suspense } from 'react';
 import { ContributionCard } from '@/components/ContributionCard';
 import { EmptyState } from '@/components/EmptyState';
+import { CardGridSkeleton } from '@/components/Skeletons';
+import { apiJson } from '@/lib/api';
 import type { MyStokvel } from '@/lib/types';
 
-// Every stokvel the person is in, whatever their role: paid, owed, next payout.
-export default async function MemberDashboardPage() {
-  const client = await api();
-  const list = unwrap<MyStokvel[]>(await client.GET('/api/me/stokvels'));
-
+// The page returns at once; the API call happens inside <Suspense>.
+export default function MemberDashboardPage() {
   return (
     <div>
       <h1 className="mb-4 text-2xl font-bold">Member dashboard</h1>
-      {list.length === 0 ? (
-        <EmptyState message="You are not in any stokvels yet." />
-      ) : (
-        <div className="grid gap-4 md:grid-cols-2">
-          {list.map((s) => (
-            <ContributionCard key={s.id} stokvel={s} />
-          ))}
-        </div>
-      )}
+      <Suspense fallback={<CardGridSkeleton />}>
+        <MemberDashboard />
+      </Suspense>
+    </div>
+  );
+}
+
+// Every stokvel the person is in, whatever their role: paid, owed, next payout.
+async function MemberDashboard() {
+  const list = await apiJson<MyStokvel[]>('/me/stokvels');
+  if (list.length === 0) return <EmptyState message="You are not in any stokvels yet." />;
+  return (
+    <div className="grid gap-4 md:grid-cols-2">
+      {list.map((s) => (
+        <ContributionCard key={s.id} stokvel={s} />
+      ))}
     </div>
   );
 }
