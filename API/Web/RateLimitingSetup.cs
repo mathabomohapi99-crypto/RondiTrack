@@ -30,6 +30,9 @@ public static class RateLimitingSetup
 
             o.AddPolicy(RateLimitPolicies.Payout, ctx =>
                 RateLimitPartition.GetTokenBucketLimiter(UserKey(ctx), _ => Bucket(cfg.GetSection("RateLimiting:Payout"))));
+                        // NEW 9.1: invite preview and join. Per signed-in person, so guessing codes gets a 429.
+            o.AddPolicy(RateLimitPolicies.Invite, ctx =>
+                RateLimitPartition.GetTokenBucketLimiter(UserKey(ctx), _ => Bucket(cfg.GetSection("RateLimiting:Invite"))));
         });
         return services;
     }

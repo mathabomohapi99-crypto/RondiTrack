@@ -173,6 +173,9 @@ builder.Services.AddScoped<IPayoutFaultHook, NoOpPayoutFaultHook>();
 builder.Services.AddScoped<IPayoutService, PayoutService>();
 builder.Services.AddScoped<IHomeService, HomeService>();
 builder.Services.AddScoped<ICycleSummaryService, CycleSummaryService>();   // 7.2
+builder.Services.AddScoped<IInviteService, InviteService>();           // NEW 9.1
+builder.Services.AddScoped<IProofService, ProofService>();             // NEW 9.1
+builder.Services.AddScoped<ICycleCloseService, CycleCloseService>();   // NEW 9.1
 
 // ---------- Background jobs (6.4) ----------
 builder.Services.Configure<CycleCloseOptions>(builder.Configuration.GetSection("Jobs:CycleClose"));      // 6.4

@@ -48,7 +48,7 @@ public sealed class ContributionService(
             throw new DomainReferenceException($"Cycle {request.CycleId} does not exist for this stokvel.");
 
         // NEW 7.4: a Closed or PaidOut cycle takes no more money. The form shows this detail if the cycle closes mid-edit.
-        if (cycle.Status != CycleStatus.Open)
+        if (cycle.Status != CycleStatus.Open || cycle.ClosedAtUtc != null)   // CHANGED 9.1: a CLOSED cycle takes no more money either
             throw new DomainConflictException("This cycle is no longer open, so contributions cannot be recorded.");
 
         if (await contributions.ExistsAsync(stokvelId, user.Id, request.CycleId))

@@ -16,8 +16,30 @@ public class RondiTrackDbContext : DbContext
     public DbSet<RefreshToken> RefreshTokens => Set<RefreshToken>();   // NEW 6.1
         public DbSet<Arrear> Arrears => Set<Arrear>();                              // 6.4
     public DbSet<IdempotencyEntry> IdempotencyEntries => Set<IdempotencyEntry>();   // 6.4
+        public DbSet<Invite> Invites => Set<Invite>();                           // NEW 9.1
+    public DbSet<ProofOfPayment> ProofsOfPayment => Set<ProofOfPayment>();   // NEW 9.1
     protected override void OnModelCreating(ModelBuilder b)
-    {
+    {        // NEW 9.1: invite codes. The code is unique, so a code points to exactly one stokvel.
+        b.Entity<Invite>(e =>
+        {
+            e.HasKey(i => i.Id);
+            e.Property(i => i.Code).HasMaxLength(Invite.CodeLength).IsRequired();
+            e.HasIndex(i => i.Code).IsUnique();
+            e.HasIndex(i => i.StokvelId);
+            e.HasOne<Stokvel>().WithMany().HasForeignKey(i => i.StokvelId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // NEW 9.1: proof of payment. UNIQUE on ContributionId = the database allows one proof per contribution.
+        b.Entity<ProofOfPayment>(e =>
+        {
+            e.HasKey(p => p.Id);
+            e.Property(p => p.ContentType).HasMaxLength(50).IsRequired();
+            e.Property(p => p.FileName).HasMaxLength(100).IsRequired();
+            e.Property(p => p.Data).IsRequired();
+            e.HasIndex(p => p.ContributionId).IsUnique();
+            e.HasIndex(p => p.StokvelId);
+            e.HasOne<Contribution>().WithMany().HasForeignKey(p => p.ContributionId).OnDelete(DeleteBehavior.Cascade);
+        });
         b.Entity<User>(e =>
         {
             e.HasKey(u => u.Id);

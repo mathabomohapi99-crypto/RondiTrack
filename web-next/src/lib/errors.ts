@@ -39,6 +39,15 @@ export function fieldErrorsFrom(body: unknown): Record<string, string> {
     if (raw && typeof raw === 'object') {
       for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
         if (Array.isArray(value) && value.length > 0) out[key.toLowerCase()] = String(value[0]);
+
+// NEW 9.1: the short "code" of a problem+json body (e.g. invite_expired, stale_preview, proof_locked)
+export function codeFrom(body: unknown): string | undefined {
+  if (body && typeof body === 'object' && 'code' in body) {
+    const c = (body as Record<string, unknown>).code;
+    if (typeof c === 'string') return c;
+  }
+  return undefined;
+}
       }
     }
   }

@@ -1,13 +1,12 @@
 import type { NextConfig } from 'next';
 
-// "as NextConfig" stops TypeScript complaining if agentRules is not in its types.
 const nextConfig = {
   reactCompiler: true,
-  // Cache Components: every page = a static shell plus parts that stream in at request time.
   cacheComponents: true,
-  // Partial Prefetching: links prefetch only the static shell of a route, never its private data.
   partialPrefetching: true,
   agentRules: false,
+  // NEW 9.1: a Server Action takes 1 MB by default. 6 MB lets a 5 MB proof (plus form overhead) through to the action.
+  experimental: { serverActions: { bodySizeLimit: '6mb' } },
 } as NextConfig;
 
 export default nextConfig;

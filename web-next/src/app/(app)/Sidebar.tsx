@@ -35,6 +35,7 @@ export async function Sidebar() {
         <Link href="/dashboard/member" className="underline">Member dashboard</Link>
         <Link href="/dashboard/treasurer" className="underline">Treasurer dashboard</Link>
         <Link href="/activity" className="underline">Activity</Link>
+        <Link href="/join" className="underline">Join with a code</Link>
       </nav>
       <PinnedStokvels userId={session.user.id} stokvelIdsKey={idsKey} />
       <form action={signOut} className="mt-4">

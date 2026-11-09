@@ -164,6 +164,42 @@ namespace RondiTrack.Migrations
                     b.ToTable("IdempotencyEntries");
                 });
 
+            modelBuilder.Entity("RondiTrack.Domain.Invite", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Code")
+                        .IsRequired()
+                        .HasMaxLength(8)
+                        .HasColumnType("character varying(8)");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("CreatedByUserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("ExpiresAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime?>("RevokedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("StokvelId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Code")
+                        .IsUnique();
+
+                    b.HasIndex("StokvelId");
+
+                    b.ToTable("Invites");
+                });
+
             modelBuilder.Entity("RondiTrack.Domain.Payout", b =>
                 {
                     b.Property<Guid>("Id")
@@ -203,6 +239,51 @@ namespace RondiTrack.Migrations
                         .IsUnique();
 
                     b.ToTable("Payouts");
+                });
+
+            modelBuilder.Entity("RondiTrack.Domain.ProofOfPayment", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ContentType")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)");
+
+                    b.Property<Guid>("ContributionId")
+                        .HasColumnType("uuid");
+
+                    b.Property<byte[]>("Data")
+                        .IsRequired()
+                        .HasColumnType("bytea");
+
+                    b.Property<string>("FileName")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<long>("SizeBytes")
+                        .HasColumnType("bigint");
+
+                    b.Property<Guid>("StokvelId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("UploadedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("UploadedByUserId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ContributionId")
+                        .IsUnique();
+
+                    b.HasIndex("StokvelId");
+
+                    b.ToTable("ProofsOfPayment");
                 });
 
             modelBuilder.Entity("RondiTrack.Domain.RefreshToken", b =>
@@ -386,12 +467,30 @@ namespace RondiTrack.Migrations
                     b.Navigation("Stokvel");
                 });
 
+            modelBuilder.Entity("RondiTrack.Domain.Invite", b =>
+                {
+                    b.HasOne("RondiTrack.Domain.Stokvel", null)
+                        .WithMany()
+                        .HasForeignKey("StokvelId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("RondiTrack.Domain.Payout", b =>
                 {
                     b.HasOne("RondiTrack.Domain.StokvelMember", null)
                         .WithMany()
                         .HasForeignKey("RecipientUserId", "StokvelId")
                         .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("RondiTrack.Domain.ProofOfPayment", b =>
+                {
+                    b.HasOne("RondiTrack.Domain.Contribution", null)
+                        .WithMany()
+                        .HasForeignKey("ContributionId")
+                        .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });
 

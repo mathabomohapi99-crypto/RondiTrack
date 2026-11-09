@@ -2,7 +2,7 @@ using System.Diagnostics;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using RondiTrack.Telemetry;
-
+using RondiTrack.Services;   // NEW 9.1: the shared calculator
 namespace RondiTrack.Jobs;
 
 // 6.4: all settings come from config "Jobs:CycleClose"
@@ -142,15 +142,11 @@ public sealed class CycleCloseJob(
                     .GroupBy(c => c.UserId).Select(g => new { UserId = g.Key, Total = g.Sum(x => x.Amount) }).ToListAsync(ct);
                 var paidByUser = paid.ToDictionary(p => p.UserId, p => (long)Math.Round(p.Total * 100m));
 
-                foreach (var userId in memberIds)
+                                // CHANGED 9.1: the same calculator the close preview uses
+                foreach (var line in CycleCloseCalculator.Arrears(dueCents, memberIds, paidByUser))
                 {
-                    paidByUser.TryGetValue(userId, out var paidCents);
-                    var shortfall = dueCents - paidCents;
-                    if (shortfall > 0)   // paid in full = no arrear
-                    {
-                        db.Arrears.Add(new Arrear(stokvelId, cur.Id, userId, shortfall, closedAt));
-                        arrearsRecorded++;
-                    }
+                    db.Arrears.Add(new Arrear(stokvelId, cur.Id, line.UserId, line.ShortfallCents, closedAt));
+                    arrearsRecorded++;
                 }
 
                 // open the next cycle (end date = one period later, still a SAST calendar date)

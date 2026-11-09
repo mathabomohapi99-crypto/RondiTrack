@@ -50,6 +50,7 @@ public class PostgresApiFactory : WebApplicationFactory<Program>, IAsyncLifetime
         builder.UseSetting("RateLimiting:Login:PermitLimit", "10000");   // old tests must not trip the limits
         builder.UseSetting("RateLimiting:Contribution:TokenLimit", "10000");
         builder.UseSetting("RateLimiting:Payout:TokenLimit", "10000");        // NEW 6.1: the app refuses to start without it
+        builder.UseSetting("RateLimiting:Invite:TokenLimit", "10000");   // NEW 9.1
     }
 
     // NEW 6.1: every client made with CreateClient() starts signed in as a platform admin.

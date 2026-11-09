@@ -11,6 +11,9 @@ import { getSession } from '@/lib/session';
 import type { StokvelDetail } from '@/lib/types';
 import { ContributionForm } from './ContributionForm';
 import { fetchRecent, RecentContributions, type RecentPage } from './RecentContributions';
+import { CloseCycleDialog } from './CloseCycleDialog';
+import { InviteButton } from './InviteButton';
+import { ProofSection } from './ProofSection';
 
 // TEMPORARY switch for the Part 7 screenshot ONLY: true shows the member picker to everybody.
 // Put it back to false before you commit.
@@ -81,17 +84,28 @@ async function StokvelDetailView({ params }: { params: Params }) {
         )}
       </section>
 
-      {cycle && (
+          {cycle && (
         <ContributionForm
           stokvelId={stokvel.id}
           cycleId={cycle.id}
           cycleNumber={cycle.cycleNumber}
           meId={session.user.id}
-          members={showPicker ? members : []} // only ids and names, and only when the picker shows
+          members={showPicker ? members : []}
           showPicker={showPicker}
           defaultAmount={centsToInput(Math.round(stokvel.contributionAmount * 100))}
-          initialKey={crypto.randomUUID()} // the server writes the first Idempotency-Key into the form
+          initialKey={crypto.randomUUID()}
         />
+      )}
+
+      {/* NEW 9.1: only an officer of THIS stokvel sees these buttons. The API is the real rule (403). */}
+      {isOfficerHere && <InviteButton stokvelId={stokvel.id} />}
+      {cycle && isOfficerHere && (
+        <CloseCycleDialog stokvelId={stokvel.id} cycleId={cycle.id} cycleNumber={cycle.cycleNumber} />
+      )}
+
+      {/* NEW 9.1: proof of payment for the current cycle */}
+      {cycle && (
+        <ProofSection stokvelId={stokvel.id} cycleId={cycle.id} meId={session.user.id} isOfficer={isOfficerHere} />
       )}
 
       <RecentContributions recent={recent} />

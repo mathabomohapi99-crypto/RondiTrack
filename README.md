@@ -1039,3 +1039,92 @@ Zustand 5.0.15, pinned, as the Zustand docs require for Next.js: a store **facto
 - If the sidebar cannot load my stokvels, pins for stokvels I left are kept until it can.
 - Activity merges three queries in the API; very large feeds would need a database view.
 - An expired page one (a tab left open for hours) is not refreshed until the next navigation.
+
+
+## API check (Week 9)
+
+| # | Question | My answer |
+|---|----------|-----------|
+| 1 | Invite codes: create, preview, join. What do unknown, expired and "already a member" return? | **Built it (it did not exist).** `POST /api/v1/stokvels/{id}/invites` (Treasurer or Admin of that stokvel; a member gets 403, an outsider 404) returns an 8-character code valid for 7 days. `GET /api/v1/invites/{code}` previews it. `POST /api/v1/invites/{code}/join` joins. Every answer has a `code` field in the problem+json: **unknown code = 404 `invite_not_found`**, **expired or revoked = 410 `invite_expired`**, **already a member = 409 `already_member`**, **stokvel full = 409 `stokvel_full`**. Preview and join are rate-limited per signed-in person (429). |
+| 2 | What does the preview contain? | Exactly: `stokvelName`, `contributionAmountCents`, `frequency`, `memberCount`, `maxMembers`, `expiresAtUtc`, `alreadyMember`, `stokvelId`. **`stokvelId` is `null` unless the caller already belongs to the stokvel.** No member names, balances or payout order are read from the database for this endpoint. A test checks the raw response body for member names and ids. The stokvel has no "rules" text field, so the schedule, amount and capacity are the rules. |
+| 3 | Can a contribution take a proof of payment? Types and size? Bytes or name? | **Built it.** `PUT /api/v1/stokvels/{id}/contributions/{contributionId}/proof` (multipart field `file`). JPEG, PNG, WebP or PDF, **up to 5 MB (5 242 880 bytes)**. The type is judged by the file's **first bytes** (magic numbers); the name and the browser's Content-Type are ignored. A wrong file gets a 400 with `errors.file`, the same place a too-large file reports. Files are stored in PostgreSQL (`bytea`), so there is no public link. |
+| 4 | Who may download? | The uploader, the member the contribution belongs to, and Treasurers or Admins **of that contribution's stokvel**. Everyone else (an ordinary member, a treasurer of a different stokvel, or a missing id) gets the **same 404 with the same text**. Tested with Sipho, who is Treasurer in one stokvel and a Member in another. |
+| 5 | Is there a close preview, and is it the same code as the real close? | **Built it.** `GET .../cycles/{id}/close-preview` returns who goes into arrears, how much, the South African date, the total and a `version`. It calls `CycleCloseCalculator`, **the same code the nightly job now calls** (I changed the job to use it). |
+| 6 | Recorded between preview and close? Close sent twice? | `POST .../close` sends the preview's `version`. If the numbers changed, the API answers **409 `stale_preview`** and records nothing. The same `Idempotency-Key` returns the first result with `Idempotency-Replayed: true`, so arrears are recorded once. Concurrent closes are guarded by one database `UPDATE ... WHERE ClosedAtUtc IS NULL`, plus a unique (cycle, member) index on arrears. |
+
+**API work, with tests** (`RondiTrack.Tests/InviteTests.cs`, `ProofOfPaymentTests.cs`, `CloseCyclePreviewTests.cs`):
+
+
+I also fixed a gap: a cycle closed by the job or a treasurer still had `Status = Open`, so it could still take contributions. `ContributionService` now refuses them (409).
+
+## Join flow
+
+One page, `/join`, with the step **in the URL query** (`/join?code=K7M29QXP&step=rules`). I chose the query string over a path per step because the code has to travel with every step anyway, the invite link is just `/join?code=…`, and `?next=` can carry the whole thing through sign-in. The state machine is one small module, `src/lib/joinFlow.ts` (a table, `transition()` and `joinHref()`), tested in `joinFlow.test.ts`.
+
+| Step | URL | Shows | What moves it on |
+|------|-----|-------|------------------|
+| 1. Invite code | `/join?step=code&code=…` | One input, **prefilled from the URL**. A message if the last attempt failed. | Submit runs `checkCode` (a Server Action) which asks the API. OK moves to step 2. Unknown, expired, rate-limited or badly formed stays on step 1 with words (`problem=` in the URL). |
+| 2. What you are joining | `/join?step=rules&code=…` | Stokvel name, contribution amount and schedule, member count, when the invite expires. | Continue goes to step 3. Back goes to step 1 (code still there). |
+| 3. Confirm | `/join?step=confirm&code=…` | The same details again (loaded from the invite, not asked for), and the Join button. | Join runs `joinStokvel`, which sends the join with the person's own token and goes to the stokvel. Back goes to step 2. |
+| Already a member | `/join?step=member&code=…` | "You are already a member of …" with a link to the stokvel. | Not a step. Reached from step 2 or 3 when the API says `alreadyMember`. |
+
+- **Back, reload and the invite link land on the right step.** A link with only `?code=` lands on step 2. A step that needs a valid code (2, 3 or the member screen) with no valid code **redirects** to step 1, so the URL never says one step while showing another.
+- **Never asked twice (3.3.7):** the code is in the URL, so Back keeps it. Step 3 re-reads the invite on the server instead of asking again.
+- **Every answer is a screen:** unknown code = "Check the code and try again", expired = "Ask for a new invite", already a member = a link to the stokvel, 429 = "Too many attempts". None is an error page.
+- **One click is one join:** the button is disabled while the request runs. If two joins still arrive, the API answers the second with 409 `already_member`, and the action sends the person to the stokvel instead of showing an error. A retry after a dropped connection works the same way.
+- **Focus follows the step:** each step's heading (`key={screen}`) takes focus and reads "Step 2 of 3: …". The step list marks the current step with `aria-current="step"`.
+- **Signed out:** `proxy.ts` sends a signed-out visitor to `/login?next=/join?code=…`, and `signIn` follows `next` only through `safeNextPath` (a path on our own site), so they come back to the same step with the same code.
+- **Privacy:** the API's preview contains only the fields in the table above. A test checks the raw JSON body for member names and ids. `stokvelId` is `null` unless you are already a member.
+
+## Uploads
+
+A proof is attached to a contribution: a file input in a form, JPEG, PNG, WebP or PDF, up to 5 MB.
+
+| Hop | Limit | What the person sees when a file is over it |
+|-----|-------|---------------------------------------------|
+| Browser (`checkProofFile`) | 5 MB (5 242 880 bytes); JPEG, PNG, WebP or PDF by `file.type` | A message under the input before anything is sent; the Upload button is disabled |
+| Next.js Server Action | `experimental.serverActions.bodySizeLimit: '6mb'` (default is 1 MB) | A file between 5 and 6 MB still reaches the action, which checks the size again and shows the same message under the input |
+| API | `[RequestSizeLimit]` of 5 MB + 64 KB, file at most 5 MB, type judged by the file's **first bytes** | `400` with `errors.file`; a `413` is mapped to the same message. Both appear under the input |
+
+Every hop is equal to or looser than the API's, so a valid file never fails earlier. I tested a file just under 5 MB: (paste the result).
+
+**Who may download:** the API decides, from the stokvel the contribution belongs to.
+
+| Who | Can download? |
+|-----|---------------|
+| The member who uploaded it, or the member the contribution belongs to | Yes |
+| A treasurer or admin of **that** stokvel | Yes |
+| An ordinary member of that stokvel | No: 404 |
+| A treasurer of a **different** stokvel | No: 404 |
+| A proof that does not exist | 404, identical text |
+
+Sipho-style roles: one person is a treasurer in one stokvel and only a member in another, so they can open every member's proof in the first and only their own in the second. The page shows a download link only where the API's list says it will work, but the 404 is what protects the file.
+
+Downloads go through `/bff/proofs`: it checks the session, adds the token, and streams the file back with `Content-Disposition: attachment`, `X-Content-Type-Options: nosniff`, `Cache-Control: private, no-store` and `X-Robots-Tag: noindex`. There is no public storage link: files live in PostgreSQL. Once a cycle is closed the API refuses replacing or removing a proof (409 `proof_locked`) and the page stops showing the upload form.
+
+## Closing a cycle
+
+`GET …/cycles/{id}/close-preview` returns who goes into arrears, how much each, the total, the South African date it is calculated for, and a `version`. The browser never calculates anything. The API's `CycleCloseCalculator` is the same code the nightly job uses.
+
+The `version` is a fingerprint of who is in the stokvel and what each person has paid in the cycle. `POST …/close` sends it back with an `Idempotency-Key`. If the numbers changed in between (for example someone recorded a contribution), the API answers `409 stale_preview` and records nothing; the dialog then loads and shows the new preview and asks again. A repeated request with the same key records the arrears once and returns the first answer. The dialog keeps its key when the outcome is unknown (no answer, 429, 5xx) and takes a new one after a real "no" or a new preview.
+
+The dialog is a native `<dialog role="alertdialog">`. It opens with focus on Cancel, Esc closes it and focus returns to the opening button, and it ignores Esc while the close runs. While the preview loads it shows placeholder rows and the confirm button is disabled. The button says what it does: "Close Cycle 3 and record R 1 500,00 in arrears". A 403 shows a message in the dialog and never signs the person out.
+
+## Feedback
+
+| Moment | Where | Why |
+|--------|-------|-----|
+| A wrong file (type, size) | Message under the input (`role="alert"`, tied with `aria-describedby`) | It belongs to one field and the person needs to fix it right there |
+| Upload succeeded | Toast that goes away after 6 seconds (`role="status"`) | Good news needs no action |
+| An unexpected failure (500, API unreachable) | Toast that stays until closed, with the reference | The person did nothing wrong and may need to quote the reference |
+| Closing a cycle | Alert dialog with the consequence in names and rands | It cannot be undone and it is money |
+| Join answers (unknown, expired, already a member) | A screen or message on the step | They are normal answers, not errors |
+
+## Known gaps
+
+- The API supports removing a proof (while the cycle is open), but the page only offers upload and replace.
+- The close button names the cycle by number ("Close Cycle 3"), because cycles have a number, not a month name.
+- A proof is stored in PostgreSQL, which is fine at this size but not what I would use for a lot of files.
+- The next cycle opens automatically on close only when the closed cycle had an end date.
+- Whether Next.js's default proxy body limit allows 5 MB uploads: shown to work by the near-limit upload test above.
+- (If Docker would not start: the new API tests were written but I could not run them on my laptop; the run is in CI instead.)
