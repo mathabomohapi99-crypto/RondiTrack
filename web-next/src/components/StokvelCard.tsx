@@ -23,14 +23,13 @@ export function StokvelCard({ stokvel }: { stokvel: MyStokvel }) {
         {formatMoney(stokvel.contributionAmount)} {stokvel.frequency.toLowerCase()} · {stokvel.memberCount} members
       </p>
       <div className="mt-2 flex gap-4">
-        <button type="button" className="text-sm underline" onClick={() => setOpen(!open)}>
+        <button type="button" className="inline-flex min-h-6 items-center px-1 text-sm underline"" onClick={() => setOpen(!open)}>
           {open ? 'Hide details' : 'Show details'}
         </button>
         {/* A pin stores ONLY the id and the name */}
         <button
           type="button"
-          className="text-sm underline"
-          aria-pressed={pinned}
+          className="inline-flex min-h-6 items-center px-1 text-sm underline"          aria-pressed={pinned}
           onClick={() => store.getState().togglePin({ id: stokvel.id, name: stokvel.name })}
         >
           {pinned ? 'Unpin' : 'Pin'}

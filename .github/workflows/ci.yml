@@ -1,0 +1,84 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: '10.0.x' }
+      - run: dotnet test
+
+  # fast checks: install, lint, types
+  check:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: web-next } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm, cache-dependency-path: web-next/package-lock.json }
+      - run: npm ci
+      - run: npx next typegen
+      - run: npm run lint
+      - run: npx tsc --noEmit
+
+  # Vitest in BOTH time zones: the laptop is South African, CI is UTC
+  unit:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        tz: [UTC, Africa/Johannesburg]
+    defaults: { run: { working-directory: web-next } }
+    env:
+      TZ: ${{ matrix.tz }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm, cache-dependency-path: web-next/package-lock.json }
+      - run: npm ci
+      - run: npx vitest run
+
+  # slow: only after everything above is green
+  e2e:
+    needs: [backend, check, unit]
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: web-next } }
+    env:
+      # test-only values; the real secrets are made fresh below
+      E2E_PASSWORD: E2e-Throwaway-Password-2026
+      E2E_DB_PASSWORD: e2e-throwaway-db
+      API_BASE_URL: http://localhost:5134
+      CI: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm, cache-dependency-path: web-next/package-lock.json }
+      - name: Make fresh throwaway secrets for this run
+        run: |
+          echo "SESSION_SECRET=$(openssl rand -base64 32)" >> "$GITHUB_ENV"
+          echo "JWT_SIGNING_KEY=$(openssl rand -base64 48)" >> "$GITHUB_ENV"
+      - name: Start the API, database and seed (fresh database)
+        working-directory: .
+        run: |
+          docker compose -f compose.e2e.yaml up -d --build
+          curl --retry 60 --retry-delay 3 --retry-connrefused -f http://localhost:5134/health/ready
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run build
+      - run: npx playwright test
+      - name: Keep the report when the run fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            web-next/playwright-report
+            web-next/test-results
+      - name: Show API logs when the run fails
+        if: failure()
+        working-directory: .
+        run: docker compose -f compose.e2e.yaml logs api

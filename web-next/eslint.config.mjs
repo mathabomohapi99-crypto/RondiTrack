@@ -16,3 +16,5 @@ const eslintConfig = defineConfig([
 ]);
 
 export default eslintConfig;
+
+  { ignores: ['playwright-report/**', 'test-results/**', 'e2e/.auth/**', 'lighthouse/**'] },

@@ -44,3 +44,10 @@ export function southAfricanDaysToUtcRange(from?: string | null, to?: string | n
   if (endMs !== undefined) range.to = toIso(endMs);
   return range;
 }
+
+// NEW 9.2: which South African calendar month does an instant belong to? "2026-10"
+export function saMonthOf(iso: string): string {
+  const ms = Date.parse(iso);
+  if (Number.isNaN(ms)) throw new RangeError(`Not an instant: ${iso}`);
+  return new Date(ms + SAST_OFFSET_MS).toISOString().slice(0, 7); // plain arithmetic: the laptop's time zone is never used
+}

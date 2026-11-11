@@ -24,3 +24,9 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* NEW 9.2: scrolling a focused element into view leaves room for the toasts and any sticky bar */
+html {
+  scroll-padding-top: 1rem;
+  scroll-padding-bottom: 8rem;
+}

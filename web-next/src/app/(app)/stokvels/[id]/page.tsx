@@ -9,15 +9,12 @@ import { fetchMembers } from '@/lib/members';
 import { centsToInput } from '@/lib/rands';
 import { getSession } from '@/lib/session';
 import type { StokvelDetail } from '@/lib/types';
-import { ContributionForm } from './ContributionForm';
 import { fetchRecent, RecentContributions, type RecentPage } from './RecentContributions';
-import { CloseCycleDialog } from './CloseCycleDialog';
-import { InviteButton } from './InviteButton';
 import { ProofSection } from './ProofSection';
+import { isOfficer } from '@/lib/roles';
+import { StokvelActions } from './StokvelActions';
 
-// TEMPORARY switch for the Part 7 screenshot ONLY: true shows the member picker to everybody.
-// Put it back to false before you commit.
-const FORCE_PICKER_FOR_SCREENSHOT = false;
+  const showPicker = FORCE_PICKER_FOR_SCREENSHOT || isOfficerHere;
 
 type Params = PageProps<'/stokvels/[id]'>['params'];
 
@@ -60,7 +57,7 @@ async function StokvelDetailView({ params }: { params: Params }) {
 
   // The Treasurer picker follows THIS stokvel's role from the API's answer. Not the session, not the token.
   // (The API treats Admin like Treasurer for recording, so both see the picker.)
-  const isOfficerHere = stokvel.myRole === 'Treasurer' || stokvel.myRole === 'Admin';
+  const isOfficerHere = isOfficer(stokvel.myRole);
   const showPicker = FORCE_PICKER_FOR_SCREENSHOT || isOfficerHere;
   const cycle = stokvel.currentCycle;
 
@@ -84,24 +81,14 @@ async function StokvelDetailView({ params }: { params: Params }) {
         )}
       </section>
 
-          {cycle && (
-        <ContributionForm
-          stokvelId={stokvel.id}
-          cycleId={cycle.id}
-          cycleNumber={cycle.cycleNumber}
-          meId={session.user.id}
-          members={showPicker ? members : []}
-          showPicker={showPicker}
-          defaultAmount={centsToInput(Math.round(stokvel.contributionAmount * 100))}
-          initialKey={crypto.randomUUID()}
-        />
-      )}
-
-      {/* NEW 9.1: only an officer of THIS stokvel sees these buttons. The API is the real rule (403). */}
-      {isOfficerHere && <InviteButton stokvelId={stokvel.id} />}
-      {cycle && isOfficerHere && (
-        <CloseCycleDialog stokvelId={stokvel.id} cycleId={cycle.id} cycleNumber={cycle.cycleNumber} />
-      )}
+            <StokvelActions
+        stokvel={stokvel}
+        meId={session.user.id}
+        members={isOfficerHere ? members : []}
+        defaultAmount={centsToInput(Math.round(stokvel.contributionAmount * 100))}
+        initialKey={crypto.randomUUID()}
+      />
+      
 
       {/* NEW 9.1: proof of payment for the current cycle */}
       {cycle && (

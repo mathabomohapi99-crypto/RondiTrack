@@ -3,8 +3,9 @@ import { needsRefresh, refreshMarginMs } from './lib/refreshPolicy';
 import { refreshOnce } from './lib/refresh';
 import { decryptSession, encryptSession, SESSION_COOKIE, sessionCookieOptions } from './lib/sessionCrypto';
 
-// Pages anyone may open. "/" only redirects.
-const PUBLIC_PATHS = ['/', '/login', '/register'];
+// CHANGED 9.2: /join is public (the page itself sends people to sign-in, bots get the metadata). /login/register is the real route
+// (the old '/register' did not exist: the Create one link was broken). opengraph-image is fetched by bots.
+const PUBLIC_PATHS = ['/', '/login', '/login/register', '/join', '/opengraph-image'];
 
 // Puts the new session into the raw Cookie header of THIS request, so the page about to render sees it
 function withSessionCookie(cookieHeader: string | null, value: string): string {

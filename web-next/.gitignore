@@ -42,3 +42,10 @@ next-env.d.ts
 
 # keep the example file in git
 !.env.example
+
+
+# NEW 9.2
+e2e/.auth/
+playwright-report/
+test-results/
+lighthouse/

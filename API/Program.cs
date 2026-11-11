@@ -218,6 +218,20 @@ if (args.Contains("--seed-volume"))
     return;
 }
 
+// NEW 9.2: test data for the end-to-end suite (compose "seed" service). Runs and exits.
+if (args.Contains("--seed-e2e"))
+{
+    var e2ePassword = app.Configuration["E2e:Password"];
+    if (string.IsNullOrWhiteSpace(e2ePassword) || e2ePassword.Length < 12)
+        throw new InvalidOperationException("--seed-e2e needs E2e:Password, at least 12 characters (set E2e__Password).");
+    using var e2eScope = app.Services.CreateScope();
+    var e2eDb = e2eScope.ServiceProvider.GetRequiredService<RondiTrackDbContext>();
+    await e2eDb.Database.MigrateAsync();
+    await E2eSeed.RunAsync(e2eDb, e2eScope.ServiceProvider.GetRequiredService<IPasswordHasher<User>>(), e2ePassword);
+    Console.WriteLine("E2E data seeded.");
+    return;
+}
+
 // 6.4: Demo:Enabled=true (compose sets it) gives Scalar, OpenAPI and demo accounts without running as "Development"
 var demoEnabled = app.Configuration.GetValue<bool>("Demo:Enabled");
 

@@ -1,14 +1,16 @@
 // Grey placeholder shapes shown while data streams in. Same shape as the real rows/cards.
-export function RowsSkeleton({ rows = 3 }: { rows?: number }) {
+export function RowsSkeleton({ rows = 3, lines = 2 }: { rows?: number; lines?: number }) {
   return (
     <ul aria-hidden="true" className="space-y-2">
       {Array.from({ length: rows }, (_, i) => (
         <li key={i} className="flex items-center justify-between rounded border p-3">
           <div className="space-y-1">
-            <div className="h-4 w-32 animate-pulse rounded bg-gray-200" />
-            <div className="h-3 w-20 animate-pulse rounded bg-gray-200" />
+            <div className="h-6 w-32 animate-pulse rounded bg-gray-200" />
+            {Array.from({ length: lines - 1 }, (_, j) => (
+              <div key={j} className="h-4 w-20 animate-pulse rounded bg-gray-200" />
+            ))}
           </div>
-          <div className="h-4 w-16 animate-pulse rounded bg-gray-200" />
+          <div className="h-6 w-16 animate-pulse rounded bg-gray-200" />
         </li>
       ))}
     </ul>
