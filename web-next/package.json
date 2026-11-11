@@ -8,7 +8,10 @@
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
-    "gen:api": "openapi-typescript http://localhost:5134/openapi/v1.json -o src/types/schema.d.ts"
+    "gen:api": "openapi-typescript http://localhost:5134/openapi/v1.json -o src/types/schema.d.ts",        "test:tz": "node scripts/vitest-runs.mjs",
+    "test:ten": "node scripts/vitest-runs.mjs --times 10 --zones UTC",
+    "e2e": "npm run build && playwright test",
+    "e2e:report": "playwright show-report"
   },
   "dependencies": {
     "@tanstack/react-query": "5.104.2",
@@ -36,3 +39,4 @@
     "vitest": "5.0.5"
   }
 }
+

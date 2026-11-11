@@ -10,3 +10,19 @@ const nextConfig = {
 } as NextConfig;
 
 export default nextConfig;
+
+import type { NextConfig } from 'next';
+
+const nextConfig = {
+  reactCompiler: true,
+  cacheComponents: true,
+  partialPrefetching: true,
+  agentRules: false,
+  experimental: { serverActions: { bodySizeLimit: '6mb' } },
+  // NEW 9.2: route handlers and downloads must never be indexed
+  async headers() {
+    return [{ source: '/bff/:path*', headers: [{ key: 'X-Robots-Tag', value: 'noindex' }] }];
+  },
+} as NextConfig;
+
+export default nextConfig;

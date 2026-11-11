@@ -10,6 +10,7 @@ import { formatCents } from '@/lib/format';
 import { parseRandsToCents } from '@/lib/rands';
 import { getSession } from '@/lib/session';
 import type { ContributionFormState } from './contributionTypes';
+import { chooseKey } from '@/lib/idempotencyKey';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -65,8 +66,7 @@ export async function recordContribution(
   //   same member + amount as the attempt that made this key  -> REUSE the key (a retry)
   //   member or amount changed since then                     -> NEW key
   const fingerprint = `${stokvelId}|${cycleId}|${memberId}|${amountInCents}`;
-  const keyIsReusable = UUID.test(sentKey) && (keyFor === '' || keyFor === fingerprint);
-  const key = keyIsReusable ? sentKey : crypto.randomUUID();
+  const key = chooseKey(sentKey, keyFor, fingerprint); // CHANGED 9.2: the rule is a pure function now (tested)
 
   // Outcome unknown (no answer, 429, 5xx): keep the key and say so
   const keepKey = (message: string, correlationId?: string): ContributionFormState => ({

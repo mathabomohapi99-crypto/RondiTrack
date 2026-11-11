@@ -4,25 +4,31 @@ import { Suspense } from 'react';
 import { DetailSkeleton } from '@/components/Skeletons';
 import { formatCents, formatDate } from '@/lib/format';
 import { fetchInvitePreview, type InvitePreview } from '@/lib/invites';
-import {
-  joinHref, normalizeCode, parseProblem, parseScreen, PROBLEM_TEXT, stepNumber, STEPS,
-  type JoinProblem, type Screen, type Step,
-} from '@/lib/joinFlow';
+import {joinHref, normalizeCode, parseProblem, parseScreen, PROBLEM_TEXT, stepNumber, STEPS,type JoinProblem, type Screen, type Step,} from '@/lib/joinFlow';
 import { getSession } from '@/lib/session';
 import { FocusHeading } from './FocusHeading';
 import { JoinForm } from './JoinForm';
 import { checkCode } from './joinActions';
+import type { Metadata } from 'next';
+import { isPreviewBot } from '@/lib/previewBot';
 
 type Props = PageProps<'/join'>;
+// The ONLY generateMetadata in the app. Signed out, nobody can know if the invite is valid (the preview needs a sign-in, and a public
+// "is this code valid?" endpoint would let anyone guess codes), so it says the same generic thing for every invite: no name, no amount.
+export async function generateMetadata(): Promise<Metadata> {
+  const title = 'You are invited to a stokvel on RondiTrack';
+  const description = 'Open this invite on RondiTrack, sign in, and see the details before you join.';
+  return { title, description, robots: { index: false, follow: false }, openGraph: { title, description, siteName: 'RondiTrack' } };
+}
 
 // The URL decides the step: /join?code=...&step=rules. Reload, Back and the invite link itself all land on the right one.
 export default function JoinPage({ searchParams }: Props) {
   return (
-    <div className="mx-auto max-w-lg space-y-4">
+        <main className="mx-auto max-w-lg space-y-4 p-6">
       <Suspense fallback={<DetailSkeleton />}>
         <JoinBody searchParams={searchParams} />
       </Suspense>
-    </div>
+    </main>
   );
 }
 
@@ -41,7 +47,11 @@ async function JoinBody({ searchParams }: { searchParams: Props['searchParams'] 
   if (code === null) redirect(joinHref('code', rawCode || null, rawCode ? 'bad_format' : undefined));
 
   const session = await getSession();
-  if (!session) redirect(`/login?next=${encodeURIComponent(joinHref(screen, code))}`);
+  if (!session) {
+    // A preview bot gets a plain page (so it reads the metadata). A person is sent to sign-in and comes back to the same step.
+    if (await isPreviewBot()) return <SignInPrompt next={joinHref(screen, code)} />;
+    redirect(`/login?next=${encodeURIComponent(joinHref(screen, code))}`);
+  }
 
   const outcome = await fetchInvitePreview(session.accessToken, code);
   if (outcome.kind === 'signedOut') redirect('/login?expired=1');
@@ -155,6 +165,18 @@ function AlreadyMember({ preview }: { preview: InvitePreview }) {
         <Link href={`/stokvels/${preview.stokvelId}`} className="inline-block rounded bg-black px-4 py-2 text-white">
           Open {preview.stokvelName}
         </Link>
+function SignInPrompt({ next }: { next: string }) {
+  return (
+    <>
+      <FocusHeading key="signin">You are invited to a stokvel on RondiTrack</FocusHeading>
+      <p className="text-sm">Sign in to see the details and join.</p>
+      <Link href={`/login?next=${encodeURIComponent(next)}`} className="inline-block rounded bg-black px-4 py-2 text-white">
+        Sign in
+      </Link>
+    </>
+  );
+}
+
       )}
     </>
   );

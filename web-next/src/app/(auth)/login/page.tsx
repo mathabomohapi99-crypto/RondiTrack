@@ -2,6 +2,9 @@ import Link from 'next/link';
 import { Suspense } from 'react';
 import { ClearPinsOnLogin } from '@/components/ClearPinsOnLogin';
 import { LoginForm } from './LoginForm';
+import type { Metadata } from 'next';
+
+export const metadata: Metadata = { title: 'Sign in', description: 'Sign in to RondiTrack to see your stokvels.' };
 
 type SearchParams = PageProps<'/login'>['searchParams'];
 
@@ -29,7 +32,7 @@ async function LoginBody({ searchParams }: { searchParams: SearchParams }) {
       <LoginForm next={next} />
       <p className="mt-4 text-sm">
         No account yet?{' '}
-        <Link href="/register" className="underline">Create one</Link>
+        <Link href="/login/register" className="underline">Create one</Link>
       </p>
     </>
   );

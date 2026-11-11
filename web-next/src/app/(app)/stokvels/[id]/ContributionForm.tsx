@@ -52,15 +52,18 @@ export function ContributionForm(props: Props) {
         <p role="status" className="text-sm text-green-700">{state.message}</p>
       )}
 
-      {props.showPicker ? (
+           {props.showPicker ? (
         <div>
           <label htmlFor="memberId" className="block text-sm">Member</label>
-          <select id="memberId" name="memberId" defaultValue={state.values.memberId} className="rounded border p-2">
+          <select id="memberId" name="memberId" defaultValue={state.values.memberId}
+            aria-invalid={state.fieldErrors?.memberId ? true : undefined}
+            aria-describedby={state.fieldErrors?.memberId ? 'memberId-error' : undefined}
+            className="rounded border p-2">
             {props.members.map((m) => (
               <option key={m.id} value={m.id}>{m.name}</option>
             ))}
           </select>
-          {state.fieldErrors?.memberId && <p role="alert" className="text-sm text-red-600">{state.fieldErrors.memberId}</p>}
+          {state.fieldErrors?.memberId && <p id="memberId-error" role="alert" className="text-sm text-red-600">{state.fieldErrors.memberId}</p>}
         </div>
       ) : (
         <input type="hidden" name="memberId" value={props.meId} />
@@ -69,8 +72,11 @@ export function ContributionForm(props: Props) {
       <div>
         <label htmlFor="amount" className="block text-sm">Amount (rands)</label>
         <input id="amount" name="amount" inputMode="decimal" autoComplete="off"
-          defaultValue={state.values.amount} className="rounded border p-2" />
-        {state.fieldErrors?.amount && <p role="alert" className="text-sm text-red-600">{state.fieldErrors.amount}</p>}
+          defaultValue={state.values.amount}
+          aria-invalid={state.fieldErrors?.amount ? true : undefined}
+          aria-describedby={state.fieldErrors?.amount ? 'amount-error' : undefined}
+          className="rounded border p-2" />
+        {state.fieldErrors?.amount && <p id="amount-error" role="alert" className="text-sm text-red-600">{state.fieldErrors.amount}</p>}
       </div>
 
       {/* One click, one request: disabled while pending */}
